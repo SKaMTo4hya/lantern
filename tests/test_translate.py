@@ -313,6 +313,38 @@ def test_glossary_text_file(tmp_path: Path):
     assert [(entry.source, entry.target) for entry in entries] == [("芙莉莲", "Frieren"), ("菲伦", "Fern")]
 
 
+def test_duplicate_speakers_are_one_name_batch(tmp_path: Path, capsys):
+    records = []
+    mapping = {"芙莉莲": "Frieren", "菲伦": "Fern"}
+    for index in range(6):
+        speaker = "芙莉莲" if index % 2 == 0 else "菲伦<e1>"
+        record = _record(f"d{index}", f"台词{index}。", index)
+        record.speaker = speaker
+        mapping[record.source] = f"Line {index}."
+        records.append(record)
+    provider = MapProvider(mapping)
+    _run(tmp_path, records, provider, batch_size=32)
+    name_calls = [call for call in provider.calls if call and call[0].startswith("glossary-name:")]
+    assert name_calls == [["glossary-name:0", "glossary-name:1"]]
+    output = capsys.readouterr().out
+    assert "progress: names 0/2 unique" in output
+    assert "progress: translate" in output
+
+
+def test_limit_only_names_speakers_in_those_lines(tmp_path: Path):
+    first = _record("d1", "芙莉莲点头。", 0)
+    first.speaker = "芙莉莲"
+    second = _record("d2", "菲伦摇头。", 1)
+    second.speaker = "菲伦"
+    provider = MapProvider({"芙莉莲": "Frieren", "菲伦": "Fern", first.source: "Frieren nods.", second.source: "Fern shakes her head."})
+    _run(tmp_path, [first, second], provider, limit=1)
+    sent = [line_id for call in provider.calls for line_id in call]
+    assert "glossary-name:0" in sent
+    assert sent.count("glossary-name:0") == 1
+    assert all(call == ["glossary-name:0"] or "d1" in call for call in provider.calls)
+    assert "d2" not in sent
+
+
 def test_limit_translates_only_the_first_dialogue_lines(tmp_path: Path):
     first = _record("d1", "おはよう。", 0)
     menu = _record("menu", "はい", 1, kind="choice")

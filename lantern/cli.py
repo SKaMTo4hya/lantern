@@ -324,9 +324,9 @@ def _extract(paths: GamePaths, args: argparse.Namespace, *, fresh: bool) -> int:
 def _print_timing(stage: str, seconds: float, lines: int | None = None) -> None:
     if lines:
         rate = lines / seconds if seconds > 0 else 0.0
-        print(f"timing: {stage} {seconds:.2f}s ({rate:.1f} lines/s)")
+        print(f"timing: {stage} {seconds:.2f}s ({rate:.1f} lines/s)", flush=True)
         return
-    print(f"timing: {stage} {seconds:.2f}s")
+    print(f"timing: {stage} {seconds:.2f}s", flush=True)
 
 
 def _print_result(stats) -> None:

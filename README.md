@@ -85,7 +85,7 @@ lantern run C:\Games\MyGame --out C:\Games\MyGame-en --language english --source
 菲伦=Fern
 ```
 
-Lantern also collects actor names and dialogue speakers, translates each remaining name once, and inserts that glossary into every later batch. A JSON glossary still works. `--model` changes the Ollama tag if you pull a different one.
+Lantern collects the distinct speakers on the lines it is about to translate (with `--limit`, only those lines), translates that short list in batches, and inserts it into every later batch. Repeated labels such as `菲伦<e1>` and `菲伦<e7>` are one name. A JSON glossary still works. `--model` changes the Ollama tag if you pull a different one. Progress lines (`done/total` and lines/second) print during the name pass and the dialogue pass. If a batch fails, Lantern prints `fallback:` with the reason and retries the failed lines, then single lines.
 
 Then, in the copy, choose the language in the game's preferences. Ren'Py does not switch languages just because `tl/english` exists. The font in the game also has to contain the characters you translate into. Lantern does not edit fonts or redraw text that is baked into images.
 

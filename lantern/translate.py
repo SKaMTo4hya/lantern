@@ -7,6 +7,8 @@ Only the lines or the batch that failed are retried, and only once.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,19 +109,20 @@ def translate_project(
         allowed = {record.id for record in chosen}
         selected = [record for record in records if record.id in allowed]
         dialogue_selected = len(chosen)
-    import time
-
     started = time.perf_counter()
     already_done = [record for record in selected if not _needs_work(record, force)]
+    name_scope = chosen if limit is not None else records
     glossary, name_count = _seed_character_names(
         project,
         store,
         provider,
         records,
+        name_scope,
         glossary,
         source_language=source_language,
         target_language=target_language,
         batch_size=batch_size,
+        workers=workers,
         force=force,
     )
     pending = [record for record in selected if _needs_work(record, force)]
@@ -135,6 +138,8 @@ def translate_project(
     failure_log.write_text("", encoding="utf-8")
 
     reject_echo = target_language.lower() not in _KEEP_SOURCE_SCRIPT
+    progress = _Progress("translate", len(pending))
+    progress.set(0)
     chains = _scene_chains(_batches(pending, batch_size))
     if workers == 1 or len(chains) <= 1:
         for chain in chains:
@@ -150,6 +155,7 @@ def translate_project(
                 context_lines,
                 stats,
                 failure_log,
+                progress,
             )
     else:
         _run_chains_concurrent(
@@ -165,6 +171,7 @@ def translate_project(
             stats,
             failure_log,
             workers,
+            progress,
         )
     stats.seconds = time.perf_counter() - started
     return stats
@@ -175,21 +182,23 @@ def _seed_character_names(
     store: Store,
     provider: TranslationProvider,
     records: list[Record],
+    scope: list[Record],
     pins: list[GlossaryEntry],
     *,
     source_language: str,
     target_language: str,
     batch_size: int,
+    workers: int,
     force: bool,
 ) -> tuple[list[GlossaryEntry], int]:
-    """Translate each character name once, then reuse that wording everywhere.
+    """Translate each distinct character name once, then reuse that wording.
 
-    Entries in the user's glossary file are pins. They are not sent to the model.
+    ``scope`` is the lines about to be translated. With ``--limit``, that is
+    only those dialogue lines, so speakers from the rest of the game are not
+    sent. Pins in the user's glossary are not sent to the model.
     """
 
-    names = collect_character_names(records)
-    if not names:
-        return pins, 0
+    names = collect_character_names(scope)
     pinned = {entry.source: entry.target for entry in pins}
     cache_path = project / ".lantern" / "auto-glossary.json"
     cached: dict[str, str] = {}
@@ -200,45 +209,227 @@ def _seed_character_names(
     resolved = {name: pinned[name] for name in names if name in pinned}
     resolved.update({name: cached[name] for name in names if name in cached and name not in resolved})
     missing = [name for name in names if name not in resolved]
+    print(
+        f"progress: names 0/{len(missing)} unique "
+        f"({len(names)} in scope, {len(resolved)} already known)",
+        flush=True,
+    )
     if missing:
-        engine = records[0].engine if records else "renpy"
-        synthetic = [
-            Record(
-                id=f"glossary-name:{index}",
-                engine=engine,
-                kind="glossary-name",
-                source=name,
-                translation=None,
-                speaker=None,
-                file="",
-                scene="names",
-                line=index,
-                source_hash="",
-                status="untranslated",
-                ordinal=index,
-            )
-            for index, name in enumerate(missing)
-        ]
+        engine = next((record.engine for record in records), "renpy")
         reject_echo = target_language.lower() not in _KEEP_SOURCE_SCRIPT
-        for batch in _batches(synthetic, min(batch_size, 40)):
-            outcomes = _resolve(
+        resolved.update(
+            _translate_unique_names(
                 provider,
-                batch,
-                [],
-                pins,
-                source_language,
-                target_language,
-                reject_echo,
-                "",
+                missing,
+                engine=engine,
+                source_language=source_language,
+                target_language=target_language,
+                batch_size=min(batch_size, 40),
+                workers=workers,
+                reject_echo=reject_echo,
+                pins=pins,
             )
-            for record in batch:
-                outcome = outcomes.get(record.id)
-                if outcome and outcome.ok and outcome.translation:
-                    resolved[record.source] = outcome.translation
+        )
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(json.dumps(resolved, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    cache_path.write_text(json.dumps({**cached, **resolved}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     written = _apply_name_records(store, provider, records, resolved, force)
     return merge_glossary(pins, resolved), written
+
+
+def _translate_unique_names(
+    provider: TranslationProvider,
+    names: list[str],
+    *,
+    engine: str,
+    source_language: str,
+    target_language: str,
+    batch_size: int,
+    workers: int,
+    reject_echo: bool,
+    pins: list[GlossaryEntry],
+) -> dict[str, str]:
+    """One request covers many distinct names. A bad response retries only the misses."""
+
+    chunks = [names[i : i + batch_size] for i in range(0, len(names), batch_size)]
+    progress = _Progress("names", len(names))
+    progress.set(0)
+    resolved: dict[str, str] = {}
+
+    def run(chunk: list[str]) -> dict[str, str]:
+        return _translate_name_chunk(
+            provider,
+            chunk,
+            engine=engine,
+            source_language=source_language,
+            target_language=target_language,
+            reject_echo=reject_echo,
+            pins=pins,
+            progress=progress,
+        )
+
+    if workers <= 1 or len(chunks) == 1:
+        for chunk in chunks:
+            resolved.update(run(chunk))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run, chunk) for chunk in chunks]
+            for future in as_completed(futures):
+                resolved.update(future.result())
+    progress.set(len(resolved))
+    return resolved
+
+
+def _translate_name_chunk(
+    provider: TranslationProvider,
+    names: list[str],
+    *,
+    engine: str,
+    source_language: str,
+    target_language: str,
+    reject_echo: bool,
+    pins: list[GlossaryEntry],
+    allow_split: bool = True,
+    progress: _Progress | None = None,
+) -> dict[str, str]:
+    records = [_name_record(engine, index, name) for index, name in enumerate(names)]
+    try:
+        result = _call(
+            provider,
+            records,
+            [],
+            pins,
+            source_language,
+            target_language,
+            reject_echo,
+            "",
+            retry_response=False,
+        )
+    except ProviderUnavailable as exc:
+        raise TranslationStopped(str(exc)) from exc
+    if isinstance(result, ProviderResponseError):
+        return _fallback_names(
+            provider,
+            names,
+            engine=engine,
+            source_language=source_language,
+            target_language=target_language,
+            reject_echo=reject_echo,
+            pins=pins,
+            allow_split=allow_split,
+            reason=str(result),
+        )
+    got: dict[str, str] = {}
+    missed: list[str] = []
+    reasons: list[str] = []
+    for record in records:
+        outcome = result.get(record.id)
+        if outcome and outcome.ok and outcome.translation:
+            got[record.source] = outcome.translation
+            if progress is not None:
+                progress.add(1)
+        else:
+            missed.append(record.source)
+            if outcome and outcome.error:
+                reasons.append(outcome.error)
+    if not missed:
+        return got
+    reason = reasons[0] if reasons else "response omitted a name"
+    rest = _fallback_names(
+        provider,
+        missed,
+        engine=engine,
+        source_language=source_language,
+        target_language=target_language,
+        reject_echo=reject_echo,
+        pins=pins,
+        allow_split=allow_split,
+        reason=reason,
+        progress=progress,
+    )
+    got.update(rest)
+    return got
+
+
+def _fallback_names(
+    provider: TranslationProvider,
+    names: list[str],
+    *,
+    engine: str,
+    source_language: str,
+    target_language: str,
+    reject_echo: bool,
+    pins: list[GlossaryEntry],
+    allow_split: bool,
+    reason: str,
+    progress: _Progress | None = None,
+) -> dict[str, str]:
+    if len(names) == 1:
+        print(f"fallback: 1 name ({names[0]}) -> {reason}; retrying once", flush=True)
+        record = _name_record(engine, 0, names[0])
+        try:
+            result = _call(
+                provider, [record], [], pins, source_language, target_language, reject_echo, reason, retry_response=False
+            )
+        except ProviderUnavailable as exc:
+            raise TranslationStopped(str(exc)) from exc
+        if isinstance(result, ProviderResponseError):
+            return {}
+        outcome = result.get(record.id)
+        if outcome and outcome.ok and outcome.translation:
+            if progress is not None:
+                progress.add(1)
+            return {names[0]: outcome.translation}
+        return {}
+    if not allow_split:
+        print(
+            f"fallback: {len(names)} names -> {reason}; retrying as single lines",
+            flush=True,
+        )
+        merged: dict[str, str] = {}
+        for name in names:
+            merged.update(
+                _translate_name_chunk(
+                    provider,
+                    [name],
+                    engine=engine,
+                    source_language=source_language,
+                    target_language=target_language,
+                    reject_echo=reject_echo,
+                    pins=pins,
+                    allow_split=False,
+                    progress=progress,
+                )
+            )
+        return merged
+    print(f"fallback: {len(names)} names -> {reason}; retrying the missing names together", flush=True)
+    return _translate_name_chunk(
+        provider,
+        names,
+        engine=engine,
+        source_language=source_language,
+        target_language=target_language,
+        reject_echo=reject_echo,
+        pins=pins,
+        allow_split=False,
+        progress=progress,
+    )
+
+
+def _name_record(engine: str, index: int, name: str) -> Record:
+    return Record(
+        id=f"glossary-name:{index}",
+        engine=engine,
+        kind="glossary-name",
+        source=name,
+        translation=None,
+        speaker=None,
+        file="",
+        scene="names",
+        line=index,
+        source_hash="",
+        status="untranslated",
+        ordinal=index,
+    )
 
 
 def _apply_name_records(
@@ -311,6 +502,7 @@ def _run_chain(
     context_lines: int,
     stats: TranslateStats,
     failure_log: Path,
+    progress: "_Progress",
 ) -> None:
     for batch in chain:
         context = _context(records, batch, context_lines)
@@ -319,6 +511,7 @@ def _run_chain(
         )
         _remember(batch, outcomes)
         _commit_outcomes(store, provider, batch, outcomes, stats, failure_log)
+        progress.add(len(batch))
 
 
 def _run_chains_concurrent(
@@ -334,6 +527,7 @@ def _run_chains_concurrent(
     stats: TranslateStats,
     failure_log: Path,
     workers: int,
+    progress: "_Progress",
 ) -> None:
     stopped: TranslationStopped | None = None
 
@@ -358,6 +552,7 @@ def _run_chains_concurrent(
                 continue
             for batch, outcomes in finished:
                 _commit_outcomes(store, provider, batch, outcomes, stats, failure_log)
+                progress.add(len(batch))
     if stopped is not None:
         raise stopped
 
@@ -403,7 +598,8 @@ def _resolve(
     if isinstance(result, ProviderResponseError):
         if len(records) == 1:
             return {records[0].id: _Outcome(False, None, str(result))}
-        return _split(provider, records, context, glossary, source_language, target_language, reject_echo, note)
+        _log_fallback(len(records), f"request failed: {result}")
+        return _singles(provider, records, context, glossary, source_language, target_language, reject_echo, str(result))
     failed = [record for record in records if not result[record.id].ok]
     good = {record.id: result[record.id] for record in records if result[record.id].ok}
     if not failed:
@@ -423,7 +619,11 @@ def _resolve(
             single_retry=False,
         )
     if len(failed) == len(records):
-        return _split(provider, records, context, glossary, source_language, target_language, reject_echo, note)
+        reason = result[failed[0].id].error or "every line failed checks"
+        _log_fallback(len(records), reason)
+        return _singles(provider, records, context, glossary, source_language, target_language, reject_echo, reason)
+    reason = result[failed[0].id].error or "some lines failed checks"
+    _log_fallback(len(failed), reason)
     smaller = _resolve(
         provider,
         failed,
@@ -439,7 +639,7 @@ def _resolve(
     return good
 
 
-def _split(
+def _singles(
     provider: TranslationProvider,
     records: list[Record],
     context: list[dict[str, str]],
@@ -449,13 +649,57 @@ def _split(
     reject_echo: bool,
     note: str,
 ) -> dict[str, _Outcome]:
-    mid = max(1, len(records) // 2)
-    if mid >= len(records):
-        mid = len(records) - 1
-    left = _resolve(provider, records[:mid], context, glossary, source_language, target_language, reject_echo, note)
-    right = _resolve(provider, records[mid:], context, glossary, source_language, target_language, reject_echo, note)
-    left.update(right)
-    return left
+    merged: dict[str, _Outcome] = {}
+    for record in records:
+        merged.update(
+            _resolve(
+                provider,
+                [record],
+                context,
+                glossary,
+                source_language,
+                target_language,
+                reject_echo,
+                note,
+                single_retry=True,
+            )
+        )
+    return merged
+
+
+def _log_fallback(count: int, reason: str) -> None:
+    print(f"fallback: {count} lines -> {reason}; retrying as single lines", flush=True)
+
+
+class _Progress:
+    """Print done/total and lines/second at least every couple of seconds."""
+
+    def __init__(self, stage: str, total: int):
+        self.stage = stage
+        self.total = total
+        self.done = 0
+        self.started = time.perf_counter()
+        self.last = 0.0
+        self._lock = threading.Lock()
+
+    def set(self, done: int) -> None:
+        with self._lock:
+            self.done = done
+            self._emit(force=done == 0 or done >= self.total)
+
+    def add(self, count: int) -> None:
+        with self._lock:
+            self.done += count
+            self._emit(force=self.done >= self.total)
+
+    def _emit(self, force: bool) -> None:
+        now = time.perf_counter()
+        if not force and now - self.last < 2:
+            return
+        self.last = now
+        elapsed = now - self.started
+        rate = self.done / elapsed if elapsed > 0 else 0.0
+        print(f"progress: {self.stage} {self.done}/{self.total} ({rate:.1f} lines/s)", flush=True)
 
 
 def _commit_outcomes(
