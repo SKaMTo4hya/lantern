@@ -8,7 +8,7 @@ from pathlib import Path
 
 from lantern.engines.base import GamePaths, resolve_game
 
-DEFAULT_MODEL = "qwen2.5:7b-instruct"
+DEFAULT_MODEL = "qwen3:8b"
 DEFAULT_HOST = "http://127.0.0.1:11434"
 
 CONFIG_NAME = "config.json"

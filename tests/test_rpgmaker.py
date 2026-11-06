@@ -133,6 +133,50 @@ def test_cli_run_on_synthetic_project(tmp_path: Path):
     ).read_bytes()
 
 
+def test_cli_limit_writes_only_the_first_dialogue_lines(tmp_path: Path, capsys):
+    source = tmp_path / "source"
+    shutil.copytree(FIXTURE, source)
+    extracted = RpgMakerAdapter().extract(resolve_game(source))
+    dialogue = [record for record in extracted.records if record.kind == "dialogue"]
+    assert len(dialogue) >= 3
+    mapping = {record.source: "EN:" + record.source for record in extracted.records}
+    mock_map = tmp_path / "mock_map.json"
+    mock_map.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "limited"
+    code = main(
+        [
+            "run",
+            str(source),
+            "--out",
+            str(out),
+            "--provider",
+            "mock",
+            "--mock-map",
+            str(mock_map),
+            "--limit",
+            "2",
+        ]
+    )
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "limit: first 2 dialogue lines" in output
+    assert "result: translated=2 skipped=0 flagged=0" in output
+
+    common = json.loads((out / "data" / "CommonEvents.json").read_text(encoding="utf-8"))
+    first = dialogue[0]
+    assert first.file == "data/CommonEvents.json"
+    assert common[1]["list"][0]["parameters"][0] == "EN:" + first.source
+
+    game_map = json.loads((out / "data" / "Map001.json").read_text(encoding="utf-8"))
+    commands = game_map["events"][1]["pages"][0]["list"]
+    assert commands[1]["parameters"][0].startswith("EN:你好，")
+    assert commands[2]["parameters"][0] == "风很大。"
+    assert commands[3]["parameters"][0][0] == "留下"
+    system = json.loads((out / "data" / "System.json").read_text(encoding="utf-8"))
+    assert system["currencyUnit"] == "金币"
+    assert (source / "data" / "Map001.json").read_bytes() == (FIXTURE / "data" / "Map001.json").read_bytes()
+
+
 def test_mv_project_is_recognized(tmp_path: Path):
     data = tmp_path / "data"
     data.mkdir()

@@ -50,8 +50,40 @@ def build_user_payload(request: BatchRequest) -> str:
     return json.dumps(body, ensure_ascii=False)
 
 
+_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_THINK_OPEN = re.compile(r"<think>.*\Z", re.IGNORECASE | re.DOTALL)
+
+
+def strip_think_blocks(content: str) -> str:
+    """Drop Qwen-style thinking traces so they cannot sit in front of the JSON."""
+
+    text = _THINK_BLOCK.sub("", content)
+    text = _THINK_OPEN.sub("", text)
+    return text.strip()
+
+
+def build_chat_payload(model: str, request: BatchRequest) -> dict:
+    """Body for Ollama ``POST /api/chat``.
+
+    ``think`` is false because Qwen3 reasons by default, and that trace makes
+    a translation batch too slow to use on an 8 GB GPU.
+    """
+
+    return {
+        "model": model,
+        "stream": False,
+        "format": "json",
+        "think": False,
+        "messages": [
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user", "content": build_user_payload(request)},
+        ],
+        "options": {"temperature": 0},
+    }
+
+
 def parse_translations(content: str) -> dict[str, str]:
-    text = content.strip()
+    text = strip_think_blocks(content)
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -87,16 +119,7 @@ class OllamaProvider(TranslationProvider):
         self.timeout = timeout
 
     def translate_batch(self, request: BatchRequest) -> dict[str, str]:
-        payload = {
-            "model": self.model,
-            "stream": False,
-            "format": "json",
-            "messages": [
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": build_user_payload(request)},
-            ],
-            "options": {"temperature": 0},
-        }
+        payload = build_chat_payload(self.model, request)
         request_body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         http_request = urllib.request.Request(
             self.host + "/api/chat",

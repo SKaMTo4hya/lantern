@@ -22,7 +22,7 @@ This version translates **Ren'Py** projects that still have `.rpy` source, and *
 Point Lantern at the project folder (the one that contains `data/System.json`):
 
 ```bat
-lantern run C:\Games\MyRPG --out C:\Games\MyRPG-en --language english
+lantern run C:\Games\MyRPG --out C:\Games\MyRPG-en --language english --limit 50
 ```
 
 It reads Show Text lines (command 401), scrolling text (405), and choices (102), and it keeps the speaker and face from the Show Text command (101) with each line. It also reads actor, class, item, skill, weapon, armor, state, and enemy names and descriptions, map names, and the System terms (including the title, currency, elements, and battle messages). Switch names and variable names are left alone. They are editor identifiers.
@@ -33,39 +33,39 @@ Control codes such as `\V[n]`, `\N[n]`, `\P[n]`, `\C[n]`, `\I[n]`, `\{`, `\}`, `
 
 The real game used to check this adapter is not in the repository. Tests use `tests/fixtures/rpg_mz`, a few original lines about a lighthouse.
 
-## Install
+## Windows setup
 
-Python 3.10 or newer. On Windows, `py` and `python` are both fine.
+Lantern needs Python 3.10 or newer. Python 3.12 is a good choice on a laptop. Install it from <https://www.python.org/downloads/windows/> and leave the **py launcher** enabled. Install [Git for Windows](https://git-scm.com/download/win) as well. `pip` uses Git to install Lantern from the private repository.
 
-```bat
-py -m pip install -e .
-```
-
-From a checkout, this also works without installing, as long as the current directory is the project root:
+Open PowerShell or Command Prompt:
 
 ```bat
-py -m lantern --help
+py -3.12 -m pip install --upgrade pip
+py -3.12 -m pip install "git+https://origin.cursor.com/git/attack-auto/lantern.git"
+lantern --help
 ```
 
-## Ollama
+`py -3` works too if 3.12 is not installed and another 3.10+ copy is. The repository is private, so Git must already be able to read it (the same login you use for Origin).
 
-Install Ollama from <https://ollama.com/download> and start it. On Windows it runs in the tray and serves `http://127.0.0.1:11434`.
+Install Ollama from <https://ollama.com/download> and start it. On Windows it sits in the tray and serves `http://127.0.0.1:11434`.
 
-Recommended default, Apache-2.0, usable Japanese, and willing to return JSON:
+The default model is `qwen3:8b` (Apache-2.0, about 5 GB at Q4). It fits an 8 GB GPU such as an RTX 5060. Qwen3 thinks unless the request turns that off, which makes every batch very slow, so Lantern sends `think: false` and drops any stray `<think>` block before it reads the JSON.
 
 ```bat
-ollama pull qwen2.5:7b-instruct
+ollama pull qwen3:8b
 ```
 
-That tag is about 4.7 GB. `qwen2.5:7b` is the same instruct model. A 14B Qwen is stronger if you have the memory. Visual-novel-tuned Japanese-to-English weights (for example Sugoi) can be better at slang, but their licenses differ and many are not official Ollama tags. Point `--model` at whatever you have pulled. Lantern does not download weights for you.
-
-Game text is sent only to the host you configure. With the default, that host is your own machine.
+Game text is sent only to that local host. A first quality check should translate a few dozen dialogue lines, not the whole game:
 
 ```bat
-lantern run C:\Games\MyGame --out C:\Games\MyGame-en --language english --model qwen2.5:7b-instruct
+lantern run C:\Games\MyGame --out C:\Games\MyGame-en --language english --limit 50
 ```
+
+`--limit 50` translates the first 50 dialogue lines and leaves every other line in the source language. Names, menus, and later dialogue stay as they were. Drop `--limit` when you want the rest. `--model` changes the Ollama tag if you pull a different one.
 
 Then, in the copy, choose the language in the game's preferences. Ren'Py does not switch languages just because `tl/english` exists. The font in the game also has to contain the characters you translate into. Lantern does not edit fonts or redraw text that is baked into images.
+
+From a local checkout, `py -3.12 -m pip install -e .` installs the same way, and `py -3.12 -m lantern` runs it without putting the script on `PATH`.
 
 ## Try the sample without a model
 
@@ -96,7 +96,9 @@ The original `examples/sample-renpy` is not modified. Running `lantern translate
 | `lantern export COPY -o review.csv` | Flagged lines as CSV. Use `--all`, or `-o review.json` |
 | `lantern import COPY review.csv` | Load edits. A row becomes `reviewed` unless its status column says otherwise |
 
-Useful options: `--language english`, `--source-language japanese`, `--model`, `--host`, `--glossary glossary.json`, `--batch-size 8`, `--context 4`, `--timeout 180`, `--force`.
+Useful options: `--language english`, `--source-language japanese`, `--model qwen3:8b`, `--host`, `--glossary glossary.json`, `--batch-size 8`, `--context 4`, `--timeout 180`, `--limit 50`, `--force`.
+
+`--limit N` translates only the first N dialogue lines, in project order, and writes only those into the copy. Use it to judge tone before a full run.
 
 `--force` retranslates lines already marked translated. Lines you imported as `reviewed` are kept. Changing the glossary does not invalidate the cache; pass `--force` when you want old lines redone.
 

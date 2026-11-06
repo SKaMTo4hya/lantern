@@ -66,6 +66,7 @@ def _run(tmp_path: Path, records: list[Record], provider: TranslationProvider, *
             batch_size=kwargs.get("batch_size", 8),
             context_lines=kwargs.get("context_lines", 4),
             force=kwargs.get("force", False),
+            limit=kwargs.get("limit"),
         )
         saved = store.list_records()
     return stats, saved
@@ -199,6 +200,48 @@ def test_parse_ollama_json_payload():
     assert parsed == {"a": "Hello ⟪TAG000⟫"}
     fenced = parse_translations('```json\n{"translations":[{"id":"b","text":"Hi"}]}\n```')
     assert parsed and fenced["b"] == "Hi"
+    wrapped = parse_translations(
+        '<think>The model reasoned here.</think>\n{"translations":[{"id":"c","translation":"Hello"}]}'
+    )
+    assert wrapped["c"] == "Hello"
+
+
+def test_ollama_chat_payload_turns_thinking_off():
+    from lantern.models import BatchRequest, PromptLine
+    from lantern.project import default_config
+    from lantern.providers.ollama import build_chat_payload
+
+    assert default_config()["model"] == "qwen3:8b"
+    request = BatchRequest(
+        lines=[PromptLine(id="a", kind="dialogue", speaker=None, source="こんにちは", masked="こんにちは")],
+        context=[],
+        glossary=[],
+        source_language="Japanese",
+        target_language="English",
+    )
+    payload = build_chat_payload("qwen3:8b", request)
+    assert payload["think"] is False
+    assert payload["model"] == "qwen3:8b"
+    assert payload["stream"] is False
+
+
+def test_limit_translates_only_the_first_dialogue_lines(tmp_path: Path):
+    first = _record("d1", "おはよう。", 0)
+    menu = _record("menu", "はい", 1, kind="choice")
+    second = _record("d2", "こんにちは。", 2)
+    third = _record("d3", "さようなら。", 3)
+    mapping = {record.source: "EN " + record.source for record in (first, menu, second, third)}
+    provider = MapProvider(mapping)
+    stats, saved = _run(tmp_path, [first, menu, second, third], provider, limit=2)
+    assert stats.dialogue_total == 3
+    assert stats.dialogue_selected == 2
+    assert stats.translated == 2
+    by_id = {record.id: record for record in saved}
+    assert by_id["d1"].translation == "EN おはよう。"
+    assert by_id["d2"].translation == "EN こんにちは。"
+    assert by_id["d3"].status == "untranslated"
+    assert by_id["menu"].status == "untranslated"
+    assert [line_id for call in provider.calls for line_id in call] == ["d1", "d2"]
 
 
 def test_source_change_marks_a_record_stale(tmp_path: Path):

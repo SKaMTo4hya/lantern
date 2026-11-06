@@ -4,4 +4,6 @@ Ren'Py and RPG Maker MV/MZ adapters are implemented. RPG Maker build patches `da
 
 A local extract of the private MZ sample (not in git) produced 6959 records. Tests use `tests/fixtures/rpg_mz` only.
 
+Default Ollama model is `qwen3:8b` with thinking disabled. `--limit N` on `run` and `translate` sends only the first N dialogue lines.
+
 Next: KiriKiri, then msg-tool formats, then Unity. An OpenAI-compatible provider is still not built.

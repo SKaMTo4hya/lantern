@@ -51,6 +51,8 @@ class TranslateStats:
     translated: int = 0
     skipped: int = 0
     flagged: int = 0
+    dialogue_total: int = 0
+    dialogue_selected: int | None = None
 
 
 @dataclass
@@ -79,12 +81,27 @@ def translate_project(
     batch_size: int,
     context_lines: int,
     force: bool = False,
+    limit: int | None = None,
 ) -> TranslateStats:
     if batch_size < 1:
         raise ValueError("batch size must be at least 1")
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be at least 1")
     records = store.list_records()
-    pending = [record for record in records if _needs_work(record, force)]
-    stats = TranslateStats(skipped=len(records) - len(pending))
+    dialogue = [record for record in records if record.kind == "dialogue"]
+    selected = records
+    dialogue_selected: int | None = None
+    if limit is not None:
+        chosen = dialogue[:limit]
+        allowed = {record.id for record in chosen}
+        selected = [record for record in records if record.id in allowed]
+        dialogue_selected = len(chosen)
+    pending = [record for record in selected if _needs_work(record, force)]
+    stats = TranslateStats(
+        skipped=len(selected) - len(pending),
+        dialogue_total=len(dialogue),
+        dialogue_selected=dialogue_selected,
+    )
     failure_log = project / ".lantern" / "failures.jsonl"
     failure_log.parent.mkdir(parents=True, exist_ok=True)
     failure_log.write_text("", encoding="utf-8")

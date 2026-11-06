@@ -85,6 +85,12 @@ def _parser() -> argparse.ArgumentParser:
     translate.add_argument("project", type=Path, help="Copy created by extract or run")
     _add_job_options(translate)
     translate.add_argument("--force", action="store_true", help="Retranslate lines already marked translated")
+    translate.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Translate only the first N dialogue lines, for a short quality check",
+    )
     translate.set_defaults(func=cmd_translate)
 
     build = sub.add_parser("build", help="Write translations into the copy")
@@ -113,6 +119,12 @@ def _parser() -> argparse.ArgumentParser:
     _add_game_out(run)
     _add_job_options(run)
     run.add_argument("--force", action="store_true")
+    run.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Translate only the first N dialogue lines, for a short quality check",
+    )
     run.set_defaults(func=cmd_run)
     return parser
 
@@ -126,7 +138,7 @@ def _add_job_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--language", default=None, help="Target language id, default english")
     parser.add_argument("--source-language", default=None, dest="source_language")
     parser.add_argument("--provider", choices=("ollama", "mock"), default=None)
-    parser.add_argument("--model", default=None, help="Ollama model name, default qwen2.5:7b-instruct")
+    parser.add_argument("--model", default=None, help="Ollama model name, default qwen3:8b")
     parser.add_argument("--host", default=None, help="Ollama host, default http://127.0.0.1:11434")
     parser.add_argument("--glossary", type=Path, default=None, help="JSON glossary of names and terms")
     parser.add_argument("--mock-map", type=Path, default=None, dest="mock_map", help="JSON source-to-translation map used by --provider mock")
@@ -162,8 +174,8 @@ def cmd_translate(args: argparse.Namespace) -> int:
     config = _apply_overrides(load_config(paths.project), args)
     _attach_sidecars(paths.project, args)
     save_config(paths.project, config)
-    stats = _translate(paths, config, force=args.force)
-    print(f"result: translated={stats.translated} skipped={stats.skipped} flagged={stats.flagged}")
+    stats = _translate(paths, config, force=args.force, limit=getattr(args, "limit", None))
+    _print_result(stats)
     return 0
 
 
@@ -230,8 +242,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if code != 0:
         return code
     config = load_config(paths.project)
-    stats = _translate(paths, config, force=args.force)
-    print(f"result: translated={stats.translated} skipped={stats.skipped} flagged={stats.flagged}")
+    stats = _translate(paths, config, force=args.force, limit=getattr(args, "limit", None))
+    _print_result(stats)
     written = _build(paths, str(config["language"]))
     for path in written:
         print(f"wrote: {path.relative_to(paths.project).as_posix()}")
@@ -289,7 +301,16 @@ def _extract(paths: GamePaths, args: argparse.Namespace, *, fresh: bool) -> int:
     return 0
 
 
-def _translate(paths: GamePaths, config: dict[str, object], *, force: bool):
+def _print_result(stats) -> None:
+    if stats.dialogue_selected is not None:
+        print(
+            f"limit: first {stats.dialogue_selected} dialogue lines "
+            f"({stats.dialogue_total} dialogue lines in the project; other lines are left unchanged)"
+        )
+    print(f"result: translated={stats.translated} skipped={stats.skipped} flagged={stats.flagged}")
+
+
+def _translate(paths: GamePaths, config: dict[str, object], *, force: bool, limit: int | None = None):
     glossary_path = paths.project / ".lantern" / "glossary.json"
     glossary = load_glossary(glossary_path) if glossary_path.is_file() else []
     provider_name = str(config["provider"])
@@ -318,6 +339,7 @@ def _translate(paths: GamePaths, config: dict[str, object], *, force: bool):
             batch_size=int(config["batch_size"]),
             context_lines=int(config["context_lines"]),
             force=force,
+            limit=limit,
         )
 
 
