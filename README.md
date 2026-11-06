@@ -41,11 +41,11 @@ Open PowerShell or Command Prompt:
 
 ```bat
 py -3.12 -m pip install --upgrade pip
-py -3.12 -m pip install "git+https://origin.cursor.com/attack-auto/lantern.git"
+py -3.12 -m pip install "git+https://github.com/SKaMTo4hya/lantern.git"
 lantern --help
 ```
 
-`py -3` works too if 3.12 is not installed and another 3.10+ copy is. The repository is private, so Git must already be able to read it (the same login you use for Origin).
+`py -3` works too if 3.12 is not installed and another 3.10+ copy is. The GitHub repository is public.
 
 Install Ollama from <https://ollama.com/download> and start it. On Windows it sits in the tray and serves `http://127.0.0.1:11434`.
 
