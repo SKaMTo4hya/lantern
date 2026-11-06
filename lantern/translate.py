@@ -16,6 +16,7 @@ from pathlib import Path
 from lantern.glossary import (
     apply_name,
     collect_character_names,
+    collect_frequent_terms,
     merge_glossary,
     select_glossary,
 )
@@ -93,6 +94,7 @@ def translate_project(
     force: bool = False,
     limit: int | None = None,
     workers: int = 1,
+    terms: bool = False,
 ) -> TranslateStats:
     if batch_size < 1:
         raise ValueError("batch size must be at least 1")
@@ -124,6 +126,7 @@ def translate_project(
         batch_size=batch_size,
         workers=workers,
         force=force,
+        terms=terms,
     )
     pending = [record for record in selected if _needs_work(record, force)]
     stats = TranslateStats(
@@ -138,9 +141,10 @@ def translate_project(
     failure_log.write_text("", encoding="utf-8")
 
     reject_echo = target_language.lower() not in _KEEP_SOURCE_SCRIPT
+    reps, copies = _collapse_duplicates(pending)
     progress = _Progress("translate", len(pending))
     progress.set(0)
-    chains = _scene_chains(_batches(pending, batch_size))
+    chains = _scene_chains(_batches(reps, batch_size))
     if workers == 1 or len(chains) <= 1:
         for chain in chains:
             _run_chain(
@@ -156,6 +160,7 @@ def translate_project(
                 stats,
                 failure_log,
                 progress,
+                copies,
             )
     else:
         _run_chains_concurrent(
@@ -172,6 +177,7 @@ def translate_project(
             failure_log,
             workers,
             progress,
+            copies,
         )
     stats.seconds = time.perf_counter() - started
     return stats
@@ -190,6 +196,7 @@ def _seed_character_names(
     batch_size: int,
     workers: int,
     force: bool,
+    terms: bool,
 ) -> tuple[list[GlossaryEntry], int]:
     """Translate each distinct character name once, then reuse that wording.
 
@@ -233,7 +240,19 @@ def _seed_character_names(
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps({**cached, **resolved}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     written = _apply_name_records(store, provider, records, resolved, force)
-    return merge_glossary(pins, resolved), written
+    glossary = merge_glossary(pins, resolved)
+    if terms:
+        glossary = _seed_terms(
+            provider,
+            scope,
+            glossary,
+            engine=next((record.engine for record in records), "renpy"),
+            source_language=source_language,
+            target_language=target_language,
+            batch_size=batch_size,
+            workers=workers,
+        )
+    return glossary, written
 
 
 def _translate_unique_names(
@@ -363,7 +382,9 @@ def _fallback_names(
     reason: str,
     progress: _Progress | None = None,
 ) -> dict[str, str]:
-    if len(names) == 1:
+    if len(names) <= 1:
+        if not names:
+            return {}
         print(f"fallback: 1 name ({names[0]}) -> {reason}; retrying once", flush=True)
         record = _name_record(engine, 0, names[0])
         try:
@@ -380,11 +401,8 @@ def _fallback_names(
                 progress.add(1)
             return {names[0]: outcome.translation}
         return {}
-    if not allow_split:
-        print(
-            f"fallback: {len(names)} names -> {reason}; retrying as single lines",
-            flush=True,
-        )
+    if len(names) <= 8 or not allow_split:
+        print(f"fallback: {len(names)} names -> {reason}; retrying as single lines", flush=True)
         merged: dict[str, str] = {}
         for name in names:
             merged.update(
@@ -401,18 +419,32 @@ def _fallback_names(
                 )
             )
         return merged
-    print(f"fallback: {len(names)} names -> {reason}; retrying the missing names together", flush=True)
-    return _translate_name_chunk(
+    print(f"fallback: {len(names)} names -> {reason}; splitting in half", flush=True)
+    mid = len(names) // 2
+    left = _translate_name_chunk(
         provider,
-        names,
+        names[:mid],
         engine=engine,
         source_language=source_language,
         target_language=target_language,
         reject_echo=reject_echo,
         pins=pins,
-        allow_split=False,
+        allow_split=True,
         progress=progress,
     )
+    right = _translate_name_chunk(
+        provider,
+        names[mid:],
+        engine=engine,
+        source_language=source_language,
+        target_language=target_language,
+        reject_echo=reject_echo,
+        pins=pins,
+        allow_split=True,
+        progress=progress,
+    )
+    left.update(right)
+    return left
 
 
 def _name_record(engine: str, index: int, name: str) -> Record:
@@ -430,6 +462,38 @@ def _name_record(engine: str, index: int, name: str) -> Record:
         status="untranslated",
         ordinal=index,
     )
+
+
+def _seed_terms(
+    provider: TranslationProvider,
+    scope: list[Record],
+    glossary: list[GlossaryEntry],
+    *,
+    engine: str,
+    source_language: str,
+    target_language: str,
+    batch_size: int,
+    workers: int,
+) -> list[GlossaryEntry]:
+    known = {entry.source for entry in glossary}
+    phrases = [phrase for phrase in collect_frequent_terms(scope) if phrase not in known]
+    if not phrases:
+        print("progress: terms 0/0 (none repeated often enough)", flush=True)
+        return glossary
+    print(f"progress: terms 0/{len(phrases)}", flush=True)
+    reject_echo = target_language.lower() not in _KEEP_SOURCE_SCRIPT
+    resolved = _translate_unique_names(
+        provider,
+        phrases,
+        engine=engine,
+        source_language=source_language,
+        target_language=target_language,
+        batch_size=min(batch_size, 40),
+        workers=workers,
+        reject_echo=reject_echo,
+        pins=glossary,
+    )
+    return merge_glossary(glossary, resolved)
 
 
 def _apply_name_records(
@@ -474,6 +538,23 @@ def _needs_name_update(record: Record) -> bool:
     return _is_character_name_record(record)
 
 
+def _collapse_duplicates(pending: list[Record]) -> tuple[list[Record], dict[str, list[Record]]]:
+    """Translate each distinct source once and copy the result onto repeats."""
+
+    groups: dict[str, list[Record]] = {}
+    for record in pending:
+        groups.setdefault(record.source, []).append(record)
+    representatives: list[Record] = []
+    copies: dict[str, list[Record]] = {}
+    for group in groups.values():
+        group.sort(key=lambda record: record.ordinal)
+        representatives.append(group[0])
+        if len(group) > 1:
+            copies[group[0].id] = group[1:]
+    representatives.sort(key=lambda record: record.ordinal)
+    return representatives, copies
+
+
 def _scene_chains(batches: list[list[Record]]) -> list[list[list[Record]]]:
     chains: list[list[list[Record]]] = []
     current: list[list[Record]] = []
@@ -503,15 +584,16 @@ def _run_chain(
     stats: TranslateStats,
     failure_log: Path,
     progress: "_Progress",
+    copies: dict[str, list[Record]] | None = None,
 ) -> None:
     for batch in chain:
         context = _context(records, batch, context_lines)
         outcomes = _resolve(
             provider, batch, context, glossary, source_language, target_language, reject_echo, ""
         )
-        _remember(batch, outcomes)
-        _commit_outcomes(store, provider, batch, outcomes, stats, failure_log)
-        progress.add(len(batch))
+        _remember(batch, outcomes, copies)
+        _commit_outcomes(store, provider, batch, outcomes, stats, failure_log, copies)
+        progress.add(len(batch) + _copy_count(batch, copies))
 
 
 def _run_chains_concurrent(
@@ -528,6 +610,7 @@ def _run_chains_concurrent(
     failure_log: Path,
     workers: int,
     progress: "_Progress",
+    copies: dict[str, list[Record]] | None = None,
 ) -> None:
     stopped: TranslationStopped | None = None
 
@@ -538,7 +621,7 @@ def _run_chains_concurrent(
             outcomes = _resolve(
                 provider, batch, context, glossary, source_language, target_language, reject_echo, ""
             )
-            _remember(batch, outcomes)
+            _remember(batch, outcomes, copies)
             finished.append((batch, outcomes))
         return finished
 
@@ -551,15 +634,39 @@ def _run_chains_concurrent(
                 stopped = exc
                 continue
             for batch, outcomes in finished:
-                _commit_outcomes(store, provider, batch, outcomes, stats, failure_log)
-                progress.add(len(batch))
+                _commit_outcomes(store, provider, batch, outcomes, stats, failure_log, copies)
+                progress.add(len(batch) + _copy_count(batch, copies))
     if stopped is not None:
         raise stopped
 
 
-def _remember(batch: list[Record], outcomes: dict[str, _Outcome]) -> None:
-    for record in batch:
+def _copy_count(batch: list[Record], copies: dict[str, list[Record]] | None) -> int:
+    if not copies:
+        return 0
+    return sum(len(copies.get(record.id, [])) for record in batch)
+
+
+def _expand(records: list[Record], outcomes: dict[str, _Outcome], copies: dict[str, list[Record]] | None):
+    if not copies:
+        return records, outcomes
+    expanded = list(records)
+    mapped = dict(outcomes)
+    for record in records:
         outcome = outcomes.get(record.id)
+        if outcome is None:
+            continue
+        for copy in copies.get(record.id, []):
+            mapped[copy.id] = outcome
+            expanded.append(copy)
+    return expanded, mapped
+
+
+def _remember(
+    batch: list[Record], outcomes: dict[str, _Outcome], copies: dict[str, list[Record]] | None = None
+) -> None:
+    records, mapped = _expand(batch, outcomes, copies)
+    for record in records:
+        outcome = mapped.get(record.id)
         if outcome and outcome.ok and outcome.translation is not None:
             record.translation = outcome.translation
             record.status = "translated"
@@ -598,8 +705,9 @@ def _resolve(
     if isinstance(result, ProviderResponseError):
         if len(records) == 1:
             return {records[0].id: _Outcome(False, None, str(result))}
-        _log_fallback(len(records), f"request failed: {result}")
-        return _singles(provider, records, context, glossary, source_language, target_language, reject_echo, str(result))
+        return _fallback_batch(
+            provider, records, context, glossary, source_language, target_language, reject_echo, f"request failed: {result}"
+        )
     failed = [record for record in records if not result[record.id].ok]
     good = {record.id: result[record.id] for record in records if result[record.id].ok}
     if not failed:
@@ -620,10 +728,11 @@ def _resolve(
         )
     if len(failed) == len(records):
         reason = result[failed[0].id].error or "every line failed checks"
-        _log_fallback(len(records), reason)
-        return _singles(provider, records, context, glossary, source_language, target_language, reject_echo, reason)
+        return _fallback_batch(
+            provider, records, context, glossary, source_language, target_language, reject_echo, reason
+        )
     reason = result[failed[0].id].error or "some lines failed checks"
-    _log_fallback(len(failed), reason)
+    _log_fallback(len(failed), reason, "retrying the failed lines")
     smaller = _resolve(
         provider,
         failed,
@@ -637,6 +746,37 @@ def _resolve(
     )
     good.update(smaller)
     return good
+
+
+def _fallback_batch(
+    provider: TranslationProvider,
+    records: list[Record],
+    context: list[dict[str, str]],
+    glossary: list,
+    source_language: str,
+    target_language: str,
+    reject_echo: bool,
+    reason: str,
+) -> dict[str, _Outcome]:
+    if len(records) <= 1:
+        if not records:
+            return {}
+        return {records[0].id: _Outcome(False, None, reason)}
+    if len(records) <= 8:
+        _log_fallback(len(records), reason, "retrying as single lines")
+        return _singles(
+            provider, records, context, glossary, source_language, target_language, reject_echo, reason
+        )
+    _log_fallback(len(records), reason, "splitting in half")
+    mid = len(records) // 2
+    left = _resolve(
+        provider, records[:mid], context, glossary, source_language, target_language, reject_echo, reason
+    )
+    right = _resolve(
+        provider, records[mid:], context, glossary, source_language, target_language, reject_echo, reason
+    )
+    left.update(right)
+    return left
 
 
 def _singles(
@@ -667,8 +807,8 @@ def _singles(
     return merged
 
 
-def _log_fallback(count: int, reason: str) -> None:
-    print(f"fallback: {count} lines -> {reason}; retrying as single lines", flush=True)
+def _log_fallback(count: int, reason: str, action: str) -> None:
+    print(f"fallback: {count} lines -> {reason}; {action}", flush=True)
 
 
 class _Progress:
@@ -709,7 +849,9 @@ def _commit_outcomes(
     outcomes: dict[str, _Outcome],
     stats: TranslateStats,
     failure_log: Path,
+    copies: dict[str, list[Record]] | None = None,
 ) -> None:
+    records, outcomes = _expand(records, outcomes, copies)
     for record in records:
         outcome = outcomes.get(record.id) or _Outcome(False, None, "missing result")
         if outcome.ok and outcome.translation is not None:

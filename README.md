@@ -120,9 +120,13 @@ The original `examples/sample-renpy` is not modified. Running `lantern translate
 | `lantern export COPY -o review.csv` | Flagged lines as CSV. Use `--all`, or `-o review.json` |
 | `lantern import COPY review.csv` | Load edits. A row becomes `reviewed` unless its status column says otherwise |
 
-Useful options: `--language english`, `--source-language chinese`, `--model qwen3:8b`, `--host`, `--glossary names.txt`, `--batch-size 32`, `--workers 4`, `--context 4`, `--timeout 180`, `--limit 50`, `--force`.
+Useful options: `--language english`, `--source-language chinese`, `--model qwen3:8b`, `--host`, `--glossary names.txt`, `--batch-size 32`, `--workers 4`, `--terms`, `--context 4`, `--timeout 180`, `--limit 50`, `--force`. `lantern bench GAME --limit 50` measures lines/sec without writing.
 
-`--limit N` translates character names, then only the first N dialogue lines. `--batch-size` is how many consecutive lines of one scene go in one request (default 32). If a batch comes back with the wrong count or broken placeholders, Lantern retries it in smaller pieces, down to one line. `--workers` is how many of those requests run at once (default 4). Set `OLLAMA_NUM_PARALLEL` to the same number before starting Ollama.
+`--limit N` translates character names, then only the first N dialogue lines. `--batch-size` is how many consecutive lines of one scene go in one request (default 32). Ollama is asked for a JSON object `{"translations":[{"n":1,"translation":"..."}]}`. Lantern also accepts an array of strings, `{id,text}` objects, a number-keyed object, and JSON inside a code fence. If a batch of more than 8 lines fails, it is split in half (32, then 16, then 8) before any line is sent alone. The log line includes a short snippet of the raw reply. A line that is only punctuation, a number, or a short name may stay identical to the source; a copied sentence is still rejected. `--workers` is how many of those requests run at once (default 4). Set `OLLAMA_NUM_PARALLEL` to the same number before starting Ollama.
+
+Repeated identical lines are translated once and copied. `--terms` (on by default, `--no-terms` to skip) collects honorifics such as 大人 and other short phrases that show up many times, translates each once, and sends that glossary with later batches.
+
+`lantern bench GAME --limit 50` times the model on N dialogue lines and does not copy or rewrite the game.
 
 `--force` retranslates lines already marked translated. Lines you imported as `reviewed` are kept. Changing the glossary does not invalidate the cache; pass `--force` when you want old lines redone.
 

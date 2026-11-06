@@ -68,6 +68,7 @@ def _run(tmp_path: Path, records: list[Record], provider: TranslationProvider, *
             context_lines=kwargs.get("context_lines", 4),
             force=kwargs.get("force", False),
             limit=kwargs.get("limit"),
+            terms=kwargs.get("terms", False),
         )
         saved = store.list_records()
     return stats, saved
@@ -205,6 +206,11 @@ def test_parse_ollama_json_payload():
         '<think>The model reasoned here.</think>\n{"translations":[{"id":"c","translation":"Hello"}]}'
     )
     assert wrapped["c"] == "Hello"
+    assert parse_translations('{"translations":["one","two"]}') == {"1": "one", "2": "two"}
+    assert parse_translations('{"1":"alpha","2":"beta"}') == {"1": "alpha", "2": "beta"}
+    assert parse_translations('{"translations":[{"id":"a","text":"from text"}]}')["a"] == "from text"
+    buried = parse_translations('Sure.\n```json\n{"translations":[{"n":1,"translation":"Yes"}]}\n```')
+    assert buried["1"] == "Yes"
 
 
 def test_ollama_chat_payload_turns_thinking_off():
@@ -224,6 +230,69 @@ def test_ollama_chat_payload_turns_thinking_off():
     assert payload["think"] is False
     assert payload["model"] == "qwen3:8b"
     assert payload["stream"] is False
+    assert payload["format"]["required"] == ["translations"]
+    named = BatchRequest(
+        lines=[PromptLine(id="glossary-name:0", kind="glossary-name", speaker=None, source="菲伦", masked="菲伦")],
+        context=[],
+        glossary=[],
+        source_language="Chinese",
+        target_language="English",
+    )
+    assert "proper names" in build_chat_payload("qwen3:8b", named)["messages"][0]["content"]
+
+
+def test_large_batch_failure_splits_in_half_before_singles(tmp_path: Path, capsys):
+    from lantern.providers.base import ProviderResponseError
+
+    records = [_record(f"d{index}", f"句子{index}。", index) for index in range(16)]
+
+    class FailAboveEight(TranslationProvider):
+        name = "half"
+        model = "half"
+
+        def __init__(self):
+            self.calls: list[int] = []
+
+        def translate_batch(self, request: BatchRequest) -> dict[str, str]:
+            self.calls.append(len(request.lines))
+            if len(request.lines) > 8:
+                raise ProviderResponseError("a translation entry is not an object")
+            return {line.id: f"Ok {line.id}" for line in request.lines}
+
+    provider = FailAboveEight()
+    stats, _saved = _run(tmp_path, records, provider, batch_size=16)
+    assert stats.translated == 16
+    assert stats.flagged == 0
+    assert provider.calls[0] == 16
+    assert provider.calls.count(16) == 1
+    assert sorted(provider.calls[1:]) == [8, 8]
+    logged = capsys.readouterr().out
+    assert "splitting in half" in logged
+    assert "not an object" in logged
+
+
+def test_exact_duplicate_lines_are_translated_once(tmp_path: Path):
+    first = _record("a", "同じ台詞。", 0)
+    second = _record("b", "同じ台詞。", 1)
+    provider = MapProvider({first.source: "The same line."})
+    stats, saved = _run(tmp_path, [first, second], provider)
+    assert provider.calls == [["a"]]
+    assert stats.translated == 2
+    assert saved[0].translation == saved[1].translation == "The same line."
+
+
+def test_repeated_honorific_is_translated_once_and_sent_with_the_batch(tmp_path: Path):
+    from lantern.glossary import collect_frequent_terms
+
+    records = [_record(f"d{index}", "大人，请。", index) for index in range(4)]
+    assert "大人" in collect_frequent_terms(records)
+    provider = MapProvider({"大人": "my lord", "大人，请。": "My lord, please."})
+    stats, saved = _run(tmp_path, records, provider, terms=True)
+    assert stats.translated == 4
+    assert provider.calls == [["glossary-name:0"], ["d0"]]
+    dialogue = provider.requests[-1]
+    assert any(entry.source == "大人" and entry.target == "my lord" for entry in dialogue.glossary)
+    assert {record.translation for record in saved} == {"My lord, please."}
 
 
 def test_batch_mismatch_falls_back_to_single_lines(tmp_path: Path):

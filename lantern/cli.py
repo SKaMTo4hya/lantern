@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -88,6 +89,7 @@ def _parser() -> argparse.ArgumentParser:
     translate.add_argument("project", type=Path, help="Copy created by extract or run")
     _add_job_options(translate)
     translate.add_argument("--workers", type=int, default=None, help="Concurrent translation requests, default 4")
+    translate.add_argument("--terms", action=argparse.BooleanOptionalAction, default=None, help="Translate repeated short phrases once (default on)")
     translate.add_argument("--force", action="store_true", help="Retranslate lines already marked translated")
     translate.add_argument(
         "--limit",
@@ -119,10 +121,19 @@ def _parser() -> argparse.ArgumentParser:
     status.add_argument("project", type=Path)
     status.set_defaults(func=cmd_status)
 
+    bench = sub.add_parser("bench", help="Time N lines against the model without writing the game")
+    bench.add_argument("game", type=Path)
+    _add_job_options(bench)
+    bench.add_argument("--workers", type=int, default=None, help="Concurrent translation requests, default 4")
+    bench.add_argument("--terms", action=argparse.BooleanOptionalAction, default=None)
+    bench.add_argument("--limit", type=int, default=50, help="How many dialogue lines to time")
+    bench.set_defaults(func=cmd_bench)
+
     run = sub.add_parser("run", help="Copy, extract, translate, and build")
     _add_game_out(run)
     _add_job_options(run)
     run.add_argument("--workers", type=int, default=None, help="Concurrent translation requests, default 4")
+    run.add_argument("--terms", action=argparse.BooleanOptionalAction, default=None, help="Translate repeated short phrases once (default on)")
     run.add_argument("--force", action="store_true")
     run.add_argument(
         "--limit",
@@ -179,7 +190,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
     config = _apply_overrides(load_config(paths.project), args)
     _attach_sidecars(paths.project, args)
     save_config(paths.project, config)
-    stats = _translate(paths, config, force=args.force, limit=getattr(args, "limit", None))
+    stats = _translate(paths, config, force=args.force, limit=getattr(args, "limit", None), terms=getattr(args, "terms", None))
     _print_result(stats)
     return 0
 
@@ -239,6 +250,51 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bench(args: argparse.Namespace) -> int:
+    """Translate N lines in a temporary store. The game folder is only read."""
+
+    paths = resolve_game(args.game)
+    detection = _detect(paths)
+    if detection.engine is None:
+        print(detection.summary)
+        return 1
+    if not detection.can_extract:
+        print(detection.summary)
+        return 2
+    print(f"engine: {detection.engine}")
+    adapter = get_adapter(detection.engine)
+    started = time.perf_counter()
+    result = adapter.extract(paths)
+    _print_timing("extract", time.perf_counter() - started)
+    print(f"extracted: {len(result.files)} files, {len(result.records)} records")
+    config = _apply_overrides(default_config(), args)
+    config["engine"] = detection.engine
+    glossary = load_glossary(getattr(args, "glossary", None))
+    provider = _make_provider(config, glossary_path=getattr(args, "glossary", None), mock_map_path=getattr(args, "mock_map", None))
+    with tempfile.TemporaryDirectory() as temporary:
+        project = Path(temporary)
+        with Store(project / "project.sqlite") as store:
+            store.replace_extracted(result.records)
+            stats = translate_project(
+                project,
+                store,
+                provider,
+                glossary=glossary,
+                source_language=str(config["source_language"]),
+                target_language=str(config["language"]),
+                batch_size=int(config["batch_size"]),
+                context_lines=int(config["context_lines"]),
+                force=False,
+                limit=args.limit,
+                workers=int(args.workers or config.get("workers") or 4),
+                terms=_terms_enabled(args, config),
+            )
+    _print_result(stats)
+    _print_timing("bench", stats.seconds, stats.translated)
+    print("bench: game files were not written")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     started = time.perf_counter()
     paths, created, code = _open_for_extract(args.game, args.out)
@@ -251,7 +307,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return code
     config = load_config(paths.project)
     mark = time.perf_counter()
-    stats = _translate(paths, config, force=args.force, limit=getattr(args, "limit", None))
+    stats = _translate(paths, config, force=args.force, limit=getattr(args, "limit", None), terms=getattr(args, "terms", None))
     _print_result(stats)
     _print_timing("translate", stats.seconds, stats.translated)
     mark = time.perf_counter()
@@ -341,24 +397,42 @@ def _print_result(stats) -> None:
     print(f"result: translated={stats.translated} skipped={stats.skipped} flagged={stats.flagged}{rate}")
 
 
-def _translate(paths: GamePaths, config: dict[str, object], *, force: bool, limit: int | None = None):
-    glossary_path = paths.project / ".lantern" / "glossary.json"
-    glossary = load_glossary(glossary_path) if glossary_path.is_file() else []
+def _terms_enabled(args: argparse.Namespace, config: dict[str, object]) -> bool:
+    value = getattr(args, "terms", None)
+    if value is None:
+        return bool(config.get("terms", True))
+    return bool(value)
+
+
+def _make_provider(config: dict[str, object], *, glossary_path: Path | None, mock_map_path: Path | None):
     provider_name = str(config["provider"])
     if provider_name == "mock":
-        map_path = paths.project / ".lantern" / "mock_map.json"
-        provider = MockProvider(load_mock_map(map_path if map_path.is_file() else None), model="mock")
-    elif provider_name == "ollama":
-        provider = OllamaProvider(
+        return MockProvider(load_mock_map(mock_map_path if mock_map_path and mock_map_path.is_file() else None), model="mock")
+    if provider_name == "ollama":
+        return OllamaProvider(
             model=str(config["model"]),
             host=str(config["host"]),
             timeout=float(config["timeout"]),
         )
-    else:
-        raise ProjectError(
-            f"Unknown provider {provider_name!r}. Use ollama or mock. "
-            "An OpenAI-compatible provider is not included yet."
-        )
+    raise ProjectError(
+        f"Unknown provider {provider_name!r}. Use ollama or mock. "
+        "An OpenAI-compatible provider is not included yet."
+    )
+
+
+def _translate(
+    paths: GamePaths,
+    config: dict[str, object],
+    *,
+    force: bool,
+    limit: int | None = None,
+    terms: bool | None = None,
+):
+    glossary_path = paths.project / ".lantern" / "glossary.json"
+    glossary = load_glossary(glossary_path) if glossary_path.is_file() else []
+    mock_map = paths.project / ".lantern" / "mock_map.json"
+    provider = _make_provider(config, glossary_path=glossary_path, mock_map_path=mock_map)
+    use_terms = bool(config.get("terms", True)) if terms is None else terms
     with Store(db_path(paths.project)) as store:
         return translate_project(
             paths.project,
@@ -372,6 +446,7 @@ def _translate(paths: GamePaths, config: dict[str, object], *, force: bool, limi
             force=force,
             limit=limit,
             workers=int(config.get("workers") or 1),
+            terms=use_terms,
         )
 
 

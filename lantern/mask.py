@@ -88,6 +88,18 @@ def mask_text(source: str, profile: str = "renpy") -> Masked:
     return Masked(text=pattern.sub(repl, source), tokens=tuple(tokens), originals=tuple(originals))
 
 
+def _is_translatable_prose(masked_text: str) -> bool:
+    """True when an unchanged line is a failed translation, not a name or '……'."""
+
+    visible = _TOKEN.sub("", masked_text).strip()
+    if not visible or not _CJK.search(visible):
+        return False
+    letters = [char for char in visible if "\u3040" <= char <= "\u9fff"]
+    if len(letters) <= 8 and not any(char in visible for char in "。！？?!，,、"):
+        return False
+    return True
+
+
 def validate_and_restore(
     source: str,
     translated: str,
@@ -116,7 +128,7 @@ def validate_and_restore(
     for token, original in zip(masked.tokens, masked.originals):
         restored = restored.replace(token, original, 1)
 
-    if reject_unchanged_cjk and restored == source and _CJK.search(source):
+    if reject_unchanged_cjk and restored == source and _is_translatable_prose(masked.text):
         return RestoreResult(False, restored, "translation echoed the source")
 
     return RestoreResult(True, restored, None)

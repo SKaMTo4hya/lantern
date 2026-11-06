@@ -10,7 +10,7 @@ Works:
 - Ollama client (untested against a live daemon) and mock provider
 - RPG Maker MV/MZ extract and JSON patch: commands 101/401/405/102, database names and descriptions, System terms
 - Mask profile `rpgmaker` for `\V \N \P \C \I \{ \} \G %1` and `<eN>` portrait tags
-- Faster runs: batch size 32, 4 workers, smaller-batch fallback, name glossary before dialogue, reuse of an existing copy
+- Faster runs: batch size 32, 4 workers, half-size fallback (32→16→8, then singles), name and repeated-term glossary, duplicate-line reuse, `lantern bench`, reuse of an existing copy
 
 Local sample (not committed): 6959 records, 3608 code-401 lines, 11 code-405 lines, 331 choices. Face graphics were empty; 2549 show-text lines had a speaker.
 

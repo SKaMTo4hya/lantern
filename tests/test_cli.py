@@ -140,6 +140,32 @@ def test_compiled_only_games_are_reported_and_not_copied(tmp_path: Path, capsys)
     assert not out.exists()
 
 
+def test_bench_times_lines_without_writing_the_game(capsys):
+    before = {path: path.read_bytes() for path in SAMPLE.rglob("*") if path.is_file()}
+    code = main(
+        [
+            "bench",
+            str(SAMPLE),
+            "--provider",
+            "mock",
+            "--mock-map",
+            str(SAMPLE / "mock_map.json"),
+            "--limit",
+            "2",
+            "--no-terms",
+            "--workers",
+            "1",
+        ]
+    )
+    assert code == 0
+    after = {path: path.read_bytes() for path in SAMPLE.rglob("*") if path.is_file()}
+    assert after == before
+    assert not (SAMPLE / ".lantern").exists()
+    logged = capsys.readouterr().out
+    assert "lines/s" in logged
+    assert "game files were not written" in logged
+
+
 def test_refuses_to_modify_the_original_folder(tmp_path: Path):
     code = main(["run", str(SAMPLE), "--out", str(SAMPLE), "--provider", "mock"])
     assert code == 1

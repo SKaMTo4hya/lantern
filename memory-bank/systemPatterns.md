@@ -8,5 +8,5 @@
 - Menu choices and `_()` / `__()` strings are separate records. Build emits one `translate <lang> strings` block and warns if the same source has two translations.
 - Placeholders `⟪TAG000⟫`, `⟪VAR000⟫`, `⟪FMT000⟫` are masked before the provider and must return once, in order.
 - Providers implement `translate_batch`. Ollama is the live provider. Mock replays a JSON map. OpenAI-compatible is a later provider, not a class in the tree.
-- Batches do not cross a label. Context is earlier lines in the same file and label. Only a failed batch or the failed lines inside it are retried, once.
+- Batches do not cross a label. Context is earlier lines in the same file and label. A failed batch larger than 8 lines is split in half; 8 or fewer become single lines. Identical source lines share one translation. Frequent short phrases are translated once and added to the glossary.
 - The SQLite file and glossary live in `<copy>/.lantern/`. Build rewrites only files listed in `built-files.txt`.

@@ -42,6 +42,7 @@ def default_config() -> dict[str, object]:
         "host": DEFAULT_HOST,
         "batch_size": 32,
         "workers": 4,
+        "terms": True,
         "context_lines": 4,
         "timeout": 180,
     }

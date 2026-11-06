@@ -56,6 +56,16 @@ def test_escaped_braces_and_percent_are_kept():
     assert "[[1]]" in result.text
 
 
+def test_identical_punctuation_names_and_numbers_are_not_echo_failures():
+    for source in ("……", "？", "42", "大人", "菲伦"):
+        result = validate_and_restore(source, source, reject_unchanged_cjk=True)
+        assert result.ok, source
+    sentence = "你好，今天天气真的很好。"
+    echoed = validate_and_restore(sentence, sentence, reject_unchanged_cjk=True)
+    assert not echoed.ok
+    assert "echoed" in (echoed.error or "")
+
+
 def test_newline_count_is_checked():
     source = "一行目。\n二行目。"
     masked = mask_text(source)
