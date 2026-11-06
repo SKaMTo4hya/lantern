@@ -46,9 +46,18 @@ class EngineAdapter(Protocol):
 
 
 def resolve_game(path: Path) -> GamePaths:
-    """Accept either the project folder or the ``game`` folder inside it."""
+    """Accept a Ren'Py project, its ``game`` folder, or an RPG Maker MV/MZ project.
+
+    RPG Maker keeps ``data/System.json`` at the project root. Ren'Py keeps
+    scripts in a ``game`` folder. A ``data`` folder passed by itself is treated
+    as the project root's parent.
+    """
 
     path = path.expanduser().resolve()
+    if path.name == "data" and (path / "System.json").is_file():
+        return GamePaths(project=path.parent, game=path.parent)
+    if (path / "data" / "System.json").is_file():
+        return GamePaths(project=path, game=path)
     if (path / "game").is_dir():
         return GamePaths(project=path, game=path / "game")
     if path.name == "game" and path.is_dir():

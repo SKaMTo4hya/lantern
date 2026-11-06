@@ -122,6 +122,23 @@ def translate_project(
     return stats
 
 
+def _mask_profile(record: Record) -> str:
+    if record.engine == "rpgmaker":
+        return "rpgmaker"
+    return "renpy"
+
+
+def _line_detail(record: Record) -> str | None:
+    parts: list[str] = []
+    face = record.rebuild.get("face")
+    if face:
+        parts.append(f"face {face}")
+    command = record.rebuild.get("command")
+    if command:
+        parts.append(f"command {command}")
+    return ", ".join(parts) or None
+
+
 def _needs_work(record: Record, force: bool) -> bool:
     if record.status == "reviewed":
         return False
@@ -210,7 +227,8 @@ def _once(
     chosen = select_glossary(glossary, [record.source for record in records])
     lines = []
     for record in records:
-        masked = mask_text(record.source)
+        profile = _mask_profile(record)
+        masked = mask_text(record.source, profile)
         lines.append(
             PromptLine(
                 id=record.id,
@@ -218,6 +236,7 @@ def _once(
                 speaker=record.speaker,
                 source=record.source,
                 masked=masked.text,
+                detail=_line_detail(record),
             )
         )
     request = BatchRequest(
@@ -227,6 +246,7 @@ def _once(
         source_language=language_name(source_language),
         target_language=language_name(target_language),
         extra_instruction=note,
+        profile=_mask_profile(records[0]) if records else "renpy",
     )
     raw = provider.translate_batch(request)
     outcomes: dict[str, _Outcome] = {}
@@ -234,7 +254,12 @@ def _once(
         if record.id not in raw:
             outcomes[record.id] = _Outcome(False, None, "response omitted this id")
             continue
-        checked = validate_and_restore(record.source, raw[record.id], reject_unchanged_cjk=reject_echo)
+        checked = validate_and_restore(
+            record.source,
+            raw[record.id],
+            reject_unchanged_cjk=reject_echo,
+            profile=_mask_profile(record),
+        )
         if checked.ok:
             outcomes[record.id] = _Outcome(True, checked.text, None)
         else:

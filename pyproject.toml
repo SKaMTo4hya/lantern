@@ -1,6 +1,6 @@
 [project]
 name = "lantern"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local CLI for translating visual novel scripts. Ren'Py first; your model, not a subscription."
 readme = "README.md"
 requires-python = ">=3.10"

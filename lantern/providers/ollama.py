@@ -39,6 +39,7 @@ def build_user_payload(request: BatchRequest) -> str:
                 "id": line.id,
                 "kind": line.kind,
                 "speaker": line.speaker,
+                "detail": line.detail or "",
                 "text": line.masked,
             }
             for line in request.lines

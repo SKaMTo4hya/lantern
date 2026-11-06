@@ -1,7 +1,11 @@
-"""Mask Ren'Py tags, interpolations, and format codes before translation.
+"""Mask control codes before translation.
 
 Placeholders are restored mechanically. The model is only asked to copy them.
 A line is accepted when every placeholder comes back once, in the original order.
+
+``renpy`` covers text tags, ``[variables]``, and printf codes.
+``rpgmaker`` covers ``\\V[n]``, ``\\N[n]``, ``\\P[n]``, ``\\C[n]``, ``\\I[n]``,
+``\\{``, ``\\}``, and the other message codes, plus ``%1`` style tokens.
 """
 
 from __future__ import annotations
@@ -18,6 +22,16 @@ _SPECIAL = re.compile(
     r"%%|"
     r"%\([^)]+\)[-+#0-9.]*[a-zA-Z]|"
     r"%[-+#0-9.]*[a-zA-Z]"
+)
+
+# Bracket codes first so \V[1] is one token, not a stray \V plus [1].
+_RPG = re.compile(
+    r"\\[A-Za-z]+\[[^\]]*\]|"
+    r"\\[{}]|"
+    r"\\[.$|^!><\\]|"
+    r"\\[GgNn]|"
+    r"%\d+|"
+    r"<e\d+>"
 )
 
 _TOKEN = re.compile(r"⟪(TAG|VAR|FMT)(\d{3})⟫")
@@ -47,27 +61,43 @@ def _kind(lexeme: str) -> str:
     return "TAG"
 
 
-def mask_text(source: str) -> Masked:
+def _rpg_kind(lexeme: str) -> str:
+    if lexeme.startswith("%"):
+        return "FMT"
+    if re.match(r"\\[VNP](?:\[|$)", lexeme):
+        return "VAR"
+    return "TAG"
+
+
+def mask_text(source: str, profile: str = "renpy") -> Masked:
+    pattern = _RPG if profile == "rpgmaker" else _SPECIAL
+    classify = _rpg_kind if profile == "rpgmaker" else _kind
     counts = {"TAG": 0, "VAR": 0, "FMT": 0}
     tokens: list[str] = []
     originals: list[str] = []
 
     def repl(match: re.Match[str]) -> str:
         lexeme = match.group(0)
-        kind = _kind(lexeme)
+        kind = classify(lexeme)
         token = f"⟪{kind}{counts[kind]:03d}⟫"
         counts[kind] += 1
         tokens.append(token)
         originals.append(lexeme)
         return token
 
-    return Masked(text=_SPECIAL.sub(repl, source), tokens=tuple(tokens), originals=tuple(originals))
+    return Masked(text=pattern.sub(repl, source), tokens=tuple(tokens), originals=tuple(originals))
 
 
-def validate_and_restore(source: str, translated: str, *, reject_unchanged_cjk: bool) -> RestoreResult:
+def validate_and_restore(
+    source: str,
+    translated: str,
+    *,
+    reject_unchanged_cjk: bool,
+    profile: str = "renpy",
+) -> RestoreResult:
     """Check a masked model reply and splice the original codes back in."""
 
-    masked = mask_text(source)
+    masked = mask_text(source, profile)
     if translated is None or not str(translated).strip():
         return RestoreResult(False, "", "empty translation")
 

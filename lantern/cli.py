@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from lantern import __version__
-from lantern.engines import get_adapter
+from lantern.engines import detect_project, get_adapter
 from lantern.engines.base import GamePaths, resolve_game
 from lantern.glossary import load_glossary
 from lantern.project import (
@@ -65,8 +65,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lantern",
         description=(
-            "Translate visual novel scripts with a local model. "
-            "Ren'Py .rpy projects are supported; the original game is never modified."
+            "Translate visual novel and RPG Maker scripts with a local model. "
+            "The original game is never modified."
         ),
     )
     parser.add_argument("--version", action="version", version=f"lantern {__version__}")
@@ -87,7 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     translate.add_argument("--force", action="store_true", help="Retranslate lines already marked translated")
     translate.set_defaults(func=cmd_translate)
 
-    build = sub.add_parser("build", help="Write tl/<language> files into the copy")
+    build = sub.add_parser("build", help="Write translations into the copy")
     build.add_argument("project", type=Path)
     build.add_argument("--language", default=None)
     build.set_defaults(func=cmd_build)
@@ -241,15 +241,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _detect(paths: GamePaths):
-    adapter = get_adapter("renpy")
-    detection = adapter.detect(paths)
-    if detection.engine is None:
-        detection.summary = (
-            "Unrecognized game. This version reads Ren'Py projects that contain a game folder "
-            "with .rpy scripts.\n"
-            "RPG Maker MV/MZ and KiriKiri are next, then msg-tool formats, then Unity."
-        )
-    return detection
+    return detect_project(paths)
 
 
 def _open_for_extract(game: Path, out: Path | None) -> tuple[GamePaths | None, bool, int]:
@@ -276,6 +268,13 @@ def _open_for_extract(game: Path, out: Path | None) -> tuple[GamePaths | None, b
 def _extract(paths: GamePaths, args: argparse.Namespace, *, fresh: bool) -> int:
     base = default_config() if fresh or not config_path(paths.project).is_file() else load_config(paths.project)
     config = _apply_overrides(base, args)
+    detection = _detect(paths)
+    if detection.engine:
+        config["engine"] = detection.engine
+    if config.get("engine") == "rpgmaker":
+        from lantern.engines.rpgmaker import ensure_source_snapshot
+
+        ensure_source_snapshot(paths)
     _attach_sidecars(paths.project, args)
     adapter = get_adapter(str(config["engine"]))
     result = adapter.extract(paths)
@@ -323,7 +322,8 @@ def _translate(paths: GamePaths, config: dict[str, object], *, force: bool):
 
 
 def _build(paths: GamePaths, language: str) -> list[Path]:
-    adapter = get_adapter("renpy")
+    config = load_config(paths.project)
+    adapter = get_adapter(str(config.get("engine") or "renpy"))
     clear_previous_build(paths)
     with Store(db_path(paths.project)) as store:
         records = store.list_records()

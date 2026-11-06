@@ -8,5 +8,9 @@ Works:
 - Mask, restore, one retry, flag, batch isolation, glossary selection, scene context
 - Copy-only output, `.rpyc` / `.rpa` refusal, CSV and JSON review round-trip
 - Ollama client (untested against a live daemon) and mock provider
+- RPG Maker MV/MZ extract and JSON patch: commands 101/401/405/102, database names and descriptions, System terms
+- Mask profile `rpgmaker` for `\V \N \P \C \I \{ \} \G %1` and `<eN>` portrait tags
+
+Local sample (not committed): 6959 records, 3608 code-401 lines, 11 code-405 lines, 331 choices. Face graphics were empty; 2549 show-text lines had a speaker.
 
 Limits still in force: no SDK-less decompile or RPA unpack, no screen text without `_()`, no RPG Maker / KiriKiri / Unity, no OpenAI provider, no font or image-text handling. See README.

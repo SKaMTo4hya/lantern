@@ -4,7 +4,7 @@ Lantern is a local command-line translator for visual novel scripts. You point i
 
 It is an open alternative to the part of [MTool](https://mtool.app/) that translates text. MTool only supports some engines, and several of its translation models sit behind a subscription. Lantern keeps the script on disk, talks to a local [Ollama](https://ollama.com/) model by default, and does not modify the original game.
 
-This version translates **Ren'Py** projects that still have `.rpy` source. It writes standard `game/tl/<language>/` files, so the Ren'Py launcher can load them.
+This version translates **Ren'Py** projects that still have `.rpy` source, and **RPG Maker MV/MZ** projects (`data/*.json`). Ren'Py output is a `game/tl/<language>/` folder. RPG Maker output is a patched copy of the data JSON.
 
 ## What it does
 
@@ -13,9 +13,25 @@ This version translates **Ren'Py** projects that still have `.rpy` source. It wr
 3. Stores those lines in a SQLite database (`<copy>/.lantern/project.sqlite`) with the source, translation, status, and a hash of the source. A later run skips lines that are already translated.
 4. Masks Ren'Py text tags (`{w}`, `{b}`), variables (`[player_name]`), and format codes (`%s`, `%(name)s`) before the model sees the line, then checks that every mask came back intact.
 5. Translates in small batches with a glossary and a few preceding lines from the same scene. A failed batch is retried once. A line that still fails is flagged, and the lines that succeeded are not sent again.
-6. Writes `game/tl/<language>/` in the copy. Dialogue ids follow Ren'Py's own rules (label plus an MD5 of the statement), so the game can apply them.
+6. Writes the translation into the copy. Ren'Py dialogue ids follow the engine's own rules (label plus an MD5 of the statement). RPG Maker lines are written back into the event or database field they came from.
 
 `.rpyc`-only and `.rpa`-only games are reported and left alone. Lantern does not decompile bytecode or unpack archives.
+
+## RPG Maker MV/MZ
+
+Point Lantern at the project folder (the one that contains `data/System.json`):
+
+```bat
+lantern run C:\Games\MyRPG --out C:\Games\MyRPG-en --language english
+```
+
+It reads Show Text lines (command 401), scrolling text (405), and choices (102), and it keeps the speaker and face from the Show Text command (101) with each line. It also reads actor, class, item, skill, weapon, armor, state, and enemy names and descriptions, map names, and the System terms (including the title, currency, elements, and battle messages). Switch names and variable names are left alone. They are editor identifiers.
+
+The copy's `data/*.json` files are patched. An untouched snapshot stays in `<copy>/.lantern/source/data/` so a later extract still sees the original language. Build does not rewrite `Hakubox-Translate-*.json` when that plugin is present. Hakubox is a flat dictionary: one translation per exact source string, looked up on the whole message. That cannot keep a speaker, a face, or a second wording of the same line in another scene. After the JSON patch, Hakubox does not find the new text and leaves it as written, so the copy is one language. The in-game language menu will not turn it back into Japanese.
+
+Control codes such as `\V[n]`, `\N[n]`, `\P[n]`, `\C[n]`, `\I[n]`, `\{`, `\}`, `\G`, and `%1` are masked and must come back unchanged. Speaker tags like `<e1>` (used by portrait plugins) are masked the same way.
+
+The real game used to check this adapter is not in the repository. Tests use `tests/fixtures/rpg_mz`, a few original lines about a lighthouse.
 
 ## Install
 
@@ -130,12 +146,13 @@ The research around MTool points at msg-tool, GalTransl, and a desktop UI as a l
 
 - A Python CLI, because that is what this version needed to be, and it runs on Windows without a launcher SDK.
 - A Ren'Py reader in this repo, instead of shelling out to the Ren'Py SDK, so `tl/<language>` files can be generated (and their ids checked) with no SDK installed.
+- RPG Maker lines are patched in the data JSON of the copy. Hakubox_Translate's dictionary is not the output, because it is one string-to-string map with no scene.
 - Ollama as the only live provider. `TranslationProvider` is the seam for an OpenAI-compatible adapter later. That adapter is not implemented.
 - SQLite as the project store. CSV and JSON are the review format, not the cache.
 
 ## Roadmap
 
-1. **RPG Maker MV/MZ and one KiriKiri game.** Use a maintained parser for each. Keep event ids and control codes intact, and test a save made on the original build.
+1. **KiriKiri**, with a maintained parser rather than a shared regex. Keep event references intact.
 2. **msg-tool adapters** for static visual-novel formats, starting with one known `.ks` and one `.asb`. Publish what was extracted, and say so when encryption or bytecode is unsupported.
 3. **Unity**, by writing XUnity.AutoTranslator text files rather than a new hook.
 4. Later, not in the core path: an OpenAI-compatible provider, a side-by-side review screen, and a LunaTranslator setup for games that can only be hooked at runtime.
@@ -144,7 +161,8 @@ Out of scope until those exist: IL2CPP patching, OCR, text baked into images, ge
 
 ## Known limits
 
-- The reader understands say lines (including `extend`, attributes, `id`, `nointeract`, `with`, and a parenthetical), a `voice` line grouped with the next say, menus, labels, and `_()` / `__()` strings. It does not translate `text "Hello"` inside screens unless it is wrapped in `_()`, Python calls like `$ m("hello")`, or say lines whose dialogue is an expression.
+- The Ren'Py reader understands say lines (including `extend`, attributes, `id`, `nointeract`, `with`, and a parenthetical), a `voice` line grouped with the next say, menus, labels, and `_()` / `__()` strings. It does not translate `text "Hello"` inside screens unless it is wrapped in `_()`, Python calls like `$ m("hello")`, or say lines whose dialogue is an expression.
+- The RPG Maker reader does not translate plugin-command arguments, comments, switch names, or variable names. Troop and common-event *names* are not rewritten; the text inside their command lists is. A patched copy no longer switches back to the source language through Hakubox.
 - Dialogue ids match current Ren'Py when the block is one or more `voice` lines plus a say. Other translatable statements (some `nvl` lines) are not included in the hash, and `config.tlid_only_considers_say` is not read. Unusual argument formatting can also change an id, because parentheses are kept with their spaces collapsed.
 - Scripts are read in sorted path order. That matches Ren'Py for unique ids. Duplicate ids across files can get a different `_1` suffix if the game loads files in another order.
 - `.rpyc` is not decompiled and `.rpa` is not unpacked. Decompile with the Ren'Py SDK or UnRen, unpack archives, then run Lantern on the `.rpy` files. Do not paste translations into `.rpyc` bytes.

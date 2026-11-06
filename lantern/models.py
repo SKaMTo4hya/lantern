@@ -57,6 +57,7 @@ class PromptLine:
     speaker: str | None
     source: str
     masked: str
+    detail: str | None = None
 
 
 @dataclass
@@ -67,3 +68,4 @@ class BatchRequest:
     source_language: str
     target_language: str
     extra_instruction: str = ""
+    profile: str = "renpy"

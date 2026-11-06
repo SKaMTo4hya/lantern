@@ -1,5 +1,7 @@
 # Active context
 
-The MVP CLI is implemented and tested. `lantern run` on `examples/sample-renpy` with `--provider mock` writes `game/tl/english/script.rpy` and `lantern_strings.rpy` in a copy. 26 tests pass without Ollama.
+Ren'Py and RPG Maker MV/MZ adapters are implemented. RPG Maker build patches `data/*.json` in the copy and keeps an untranslated snapshot in `.lantern/source/data/`. Hakubox dictionaries are not the output.
 
-Next engines, in order: RPG Maker MV/MZ and KiriKiri, then msg-tool formats, then Unity via XUnity translation files. An OpenAI-compatible provider is the translation-side follow-up.
+A local extract of the private MZ sample (not in git) produced 6959 records. Tests use `tests/fixtures/rpg_mz` only.
+
+Next: KiriKiri, then msg-tool formats, then Unity. An OpenAI-compatible provider is still not built.

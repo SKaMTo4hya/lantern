@@ -31,7 +31,7 @@ class MockProvider(TranslationProvider):
             if english is None:
                 output[line.id] = line.masked
             else:
-                output[line.id] = mask_text(english).text
+                output[line.id] = mask_text(english, request.profile).text
         return output
 
 
