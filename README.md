@@ -1,3 +1,159 @@
-# New repo
+# Lantern
 
-This repo was created by a Cursor cloud agent.
+Lantern is a local command-line translator for visual novel scripts. You point it at a game, it copies the game, and it fills in a translation with a model running on your machine.
+
+It is an open alternative to the part of [MTool](https://mtool.app/) that translates text. MTool only supports some engines, and several of its translation models sit behind a subscription. Lantern keeps the script on disk, talks to a local [Ollama](https://ollama.com/) model by default, and does not modify the original game.
+
+This version translates **Ren'Py** projects that still have `.rpy` source. It writes standard `game/tl/<language>/` files, so the Ren'Py launcher can load them.
+
+## What it does
+
+1. Copies the game to a folder you choose.
+2. Reads dialogue, menu choices, and `_()` / `__()` strings from `.rpy` files. Each line keeps its speaker, file, and label.
+3. Stores those lines in a SQLite database (`<copy>/.lantern/project.sqlite`) with the source, translation, status, and a hash of the source. A later run skips lines that are already translated.
+4. Masks Ren'Py text tags (`{w}`, `{b}`), variables (`[player_name]`), and format codes (`%s`, `%(name)s`) before the model sees the line, then checks that every mask came back intact.
+5. Translates in small batches with a glossary and a few preceding lines from the same scene. A failed batch is retried once. A line that still fails is flagged, and the lines that succeeded are not sent again.
+6. Writes `game/tl/<language>/` in the copy. Dialogue ids follow Ren'Py's own rules (label plus an MD5 of the statement), so the game can apply them.
+
+`.rpyc`-only and `.rpa`-only games are reported and left alone. Lantern does not decompile bytecode or unpack archives.
+
+## Install
+
+Python 3.10 or newer. On Windows, `py` and `python` are both fine.
+
+```bat
+py -m pip install -e .
+```
+
+From a checkout, this also works without installing, as long as the current directory is the project root:
+
+```bat
+py -m lantern --help
+```
+
+## Ollama
+
+Install Ollama from <https://ollama.com/download> and start it. On Windows it runs in the tray and serves `http://127.0.0.1:11434`.
+
+Recommended default, Apache-2.0, usable Japanese, and willing to return JSON:
+
+```bat
+ollama pull qwen2.5:7b-instruct
+```
+
+That tag is about 4.7 GB. `qwen2.5:7b` is the same instruct model. A 14B Qwen is stronger if you have the memory. Visual-novel-tuned Japanese-to-English weights (for example Sugoi) can be better at slang, but their licenses differ and many are not official Ollama tags. Point `--model` at whatever you have pulled. Lantern does not download weights for you.
+
+Game text is sent only to the host you configure. With the default, that host is your own machine.
+
+```bat
+lantern run C:\Games\MyGame --out C:\Games\MyGame-en --language english --model qwen2.5:7b-instruct
+```
+
+Then, in the copy, choose the language in the game's preferences. Ren'Py does not switch languages just because `tl/english` exists. The font in the game also has to contain the characters you translate into. Lantern does not edit fonts or redraw text that is baked into images.
+
+## Try the sample without a model
+
+`examples/sample-renpy` is a tiny original scene, not a commercial game. The mock provider replays `mock_map.json`, so you can see a finished `tl/english` tree with no Ollama running.
+
+```bat
+py -m lantern run examples\sample-renpy --out sample-en --provider mock --mock-map examples\sample-renpy\mock_map.json --glossary examples\sample-renpy\glossary.json
+```
+
+That writes:
+
+- `sample-en/game/tl/english/script.rpy` — dialogue, including the `voice` line and the explicit id `roof_careful`
+- `sample-en/game/tl/english/lantern_strings.rpy` — character names, the window title, and menu choices
+- `sample-en/.lantern/project.sqlite` — the cache
+
+The original `examples/sample-renpy` is not modified. Running `lantern translate sample-en` again prints `skipped=14`.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `lantern detect GAME` | Report Ren'Py, or explain that the scripts are only `.rpyc` / `.rpa` |
+| `lantern extract GAME --out COPY` | Copy the game and fill the database |
+| `lantern translate COPY` | Translate lines that are not done |
+| `lantern build COPY` | Write `tl/<language>` from accepted lines |
+| `lantern run GAME --out COPY` | Extract, translate, and build |
+| `lantern status COPY` | Count lines by status |
+| `lantern export COPY -o review.csv` | Flagged lines as CSV. Use `--all`, or `-o review.json` |
+| `lantern import COPY review.csv` | Load edits. A row becomes `reviewed` unless its status column says otherwise |
+
+Useful options: `--language english`, `--source-language japanese`, `--model`, `--host`, `--glossary glossary.json`, `--batch-size 8`, `--context 4`, `--timeout 180`, `--force`.
+
+`--force` retranslates lines already marked translated. Lines you imported as `reviewed` are kept. Changing the glossary does not invalidate the cache; pass `--force` when you want old lines redone.
+
+### Glossary
+
+```json
+{
+  "entries": [
+    {"source": "美咲", "target": "Misaki", "note": "heroine, she/her"},
+    {"source": "学園", "target": "school"}
+  ]
+}
+```
+
+A plain `{"美咲": "Misaki"}` object works too. Only entries that appear in the current batch are sent.
+
+### Review
+
+Flagged lines failed the placeholder check, came back empty, echoed the Japanese source, or broke the line-break count. The model is asked once more for that failed batch only. Export the flagged rows, edit the `translation` column, import, and build:
+
+```bat
+lantern export sample-en -o review.csv
+lantern import sample-en review.csv
+lantern build sample-en
+```
+
+Build writes `translated` and `reviewed` lines. Flagged lines are left out, so the game shows the original text for those.
+
+## Tests
+
+```bat
+py -m pip install -e ".[dev]"
+py -m pytest
+```
+
+The tests use the sample project and a fake provider. They do not call Ollama.
+
+## How a record is stored
+
+Dialogue is not a single global "Japanese string to English string" map. The same line can be translated differently in two scenes. A dialogue id is the Ren'Py translation id (`start_636ae3f5`, or an explicit `id` written in the script). Menu choices and `_()` strings are separate rows; when they are written out, Ren'Py itself only allows one replacement per source string, so conflicting edits are reported in `.lantern/string-conflicts.json` and one of them is written.
+
+Statuses are `untranslated`, `translated`, `reviewed`, `flagged`, and `stale` (the source text changed).
+
+## Design notes
+
+The research around MTool points at msg-tool, GalTransl, and a desktop UI as a larger product. This MVP is narrower on purpose:
+
+- A Python CLI, because that is what this version needed to be, and it runs on Windows without a launcher SDK.
+- A Ren'Py reader in this repo, instead of shelling out to the Ren'Py SDK, so `tl/<language>` files can be generated (and their ids checked) with no SDK installed.
+- Ollama as the only live provider. `TranslationProvider` is the seam for an OpenAI-compatible adapter later. That adapter is not implemented.
+- SQLite as the project store. CSV and JSON are the review format, not the cache.
+
+## Roadmap
+
+1. **RPG Maker MV/MZ and one KiriKiri game.** Use a maintained parser for each. Keep event ids and control codes intact, and test a save made on the original build.
+2. **msg-tool adapters** for static visual-novel formats, starting with one known `.ks` and one `.asb`. Publish what was extracted, and say so when encryption or bytecode is unsupported.
+3. **Unity**, by writing XUnity.AutoTranslator text files rather than a new hook.
+4. Later, not in the core path: an OpenAI-compatible provider, a side-by-side review screen, and a LunaTranslator setup for games that can only be hooked at runtime.
+
+Out of scope until those exist: IL2CPP patching, OCR, text baked into images, generic KiriKiri Z decryption, every visual-novel archive, voice generation, and save editing.
+
+## Known limits
+
+- The reader understands say lines (including `extend`, attributes, `id`, `nointeract`, `with`, and a parenthetical), a `voice` line grouped with the next say, menus, labels, and `_()` / `__()` strings. It does not translate `text "Hello"` inside screens unless it is wrapped in `_()`, Python calls like `$ m("hello")`, or say lines whose dialogue is an expression.
+- Dialogue ids match current Ren'Py when the block is one or more `voice` lines plus a say. Other translatable statements (some `nvl` lines) are not included in the hash, and `config.tlid_only_considers_say` is not read. Unusual argument formatting can also change an id, because parentheses are kept with their spaces collapsed.
+- Scripts are read in sorted path order. That matches Ren'Py for unique ids. Duplicate ids across files can get a different `_1` suffix if the game loads files in another order.
+- `.rpyc` is not decompiled and `.rpa` is not unpacked. Decompile with the Ren'Py SDK or UnRen, unpack archives, then run Lantern on the `.rpy` files. Do not paste translations into `.rpyc` bytes.
+- `Character("美咲")` without `_()` is reported and not written as a string translation. Ren'Py would not apply one. Wrap display names in `_()` in the game, or edit the copy's definitions yourself.
+- String translations are one pair per source string for the whole game. Dialogue can differ by scene; menu text cannot.
+- A translated copy still needs a language menu (or preferences) and a font that covers the target language. Line wrapping, image text, and encodings such as CP932 in non-Ren'Py engines are separate problems.
+- If Ollama is down, the command stops after one retry. Lines already accepted stay saved; the unfinished batch is not flagged. Run `translate` again when the model is up.
+- The mock provider only knows the map you give it. It is for tests and for the sample, not for a real game.
+
+## License
+
+MIT, for this program. It does not license any game you translate. Keep game files local, and do not ship a commercial game or its archives with your translation.

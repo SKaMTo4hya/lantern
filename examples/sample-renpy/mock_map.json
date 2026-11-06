@@ -1,0 +1,16 @@
+{
+  "美咲": "Misaki",
+  "健一": "Kenichi",
+  "小さなサンプル": "A small sample",
+  "こんにちは、[player_name]。{w}今日はいい天気ね。": "Hello, [player_name].{w}The weather is nice today.",
+  "美咲、学園の門で待ってたよ。": "Misaki, I was waiting at the school gate.",
+  "ごめん、ちょっと遅れちゃった。": "Sorry, I got a little delayed.",
+  "じゃあ、行こっか。": "Then let's go.",
+  "どこへ行く？": "Where should we go?",
+  "屋上へ行く": "Go to the roof",
+  "図書室に残る": "Stay in the library",
+  "分かった。また後で。": "Got it. See you later.",
+  "ここ、静かだね。%(place)sみたい。": "It's quiet here. It feels like %(place)s.",
+  "風が強い。": "The wind is strong.",
+  "気をつけて{b}ね{/b}。": "Be careful{b}, okay{/b}?"
+}
