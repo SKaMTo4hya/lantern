@@ -41,7 +41,7 @@ Open PowerShell or Command Prompt:
 
 ```bat
 py -3.12 -m pip install --upgrade pip
-py -3.12 -m pip install "git+https://origin.cursor.com/git/attack-auto/lantern.git"
+py -3.12 -m pip install "git+https://origin.cursor.com/attack-auto/lantern.git"
 lantern --help
 ```
 
