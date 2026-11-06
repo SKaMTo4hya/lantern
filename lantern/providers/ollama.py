@@ -12,16 +12,17 @@ from lantern.providers.base import ProviderResponseError, ProviderUnavailable, T
 
 _SYSTEM = """You translate visual novel script lines.
 Reply with one JSON object and nothing else:
-{"translations":[{"id":"<id>","translation":"<text>"}]}
+{"translations":[{"n":1,"translation":"..."}]}
 Rules:
-- Return one object for every input id, and no extras.
-- Translate only the objects in "lines". Context is read-only.
+- n is the line number from the input. It starts at 1.
+- Return one item for every input line, and no extras. Keep the same count.
+- Translate only "lines". Context is read-only.
 - Write the translation in the requested target language.
 - Copy every placeholder exactly. Placeholders look like ⟪TAG000⟫, ⟪VAR000⟫, and ⟪FMT000⟫.
 - Keep placeholders in the same order. Do not translate, add, drop, or reorder them.
 - Keep the same number of line breaks as the masked line.
-- When a glossary entry's source text appears, use its target wording.
-- Do not add notes, speaker names, or quotation marks that were not in the line.
+- When a glossary entry's source text appears, use its target wording, including names.
+- Do not add notes or quotation marks that were not in the line.
 """
 
 
@@ -36,13 +37,12 @@ def build_user_payload(request: BatchRequest) -> str:
         "context": request.context,
         "lines": [
             {
-                "id": line.id,
-                "kind": line.kind,
-                "speaker": line.speaker,
+                "n": index,
+                "speaker": line.speaker or "",
                 "detail": line.detail or "",
                 "text": line.masked,
             }
-            for line in request.lines
+            for index, line in enumerate(request.lines, start=1)
         ],
     }
     if request.extra_instruction:
@@ -103,10 +103,13 @@ def parse_translations(content: str) -> dict[str, str]:
 
     output: dict[str, str] = {}
     for item in items:
-        if not isinstance(item, dict) or "id" not in item:
-            raise ValueError("a translation entry is missing id")
+        if not isinstance(item, dict):
+            raise ValueError("a translation entry is not an object")
+        key = item.get("id", item.get("n"))
+        if key is None:
+            raise ValueError("a translation entry is missing n")
         value = item.get("translation", item.get("text", ""))
-        output[str(item["id"])] = "" if value is None else str(value)
+        output[str(key)] = "" if value is None else str(value)
     return output
 
 

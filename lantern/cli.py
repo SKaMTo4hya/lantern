@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from lantern import __version__
@@ -25,6 +26,7 @@ from lantern.project import (
     load_config,
     record_build,
     require_project,
+    reuse_project,
     save_config,
 )
 from lantern.providers.mock import MockProvider, load_mock_map
@@ -40,6 +42,7 @@ _OVERRIDES = (
     ("model", "model"),
     ("host", "host"),
     ("batch_size", "batch_size"),
+    ("workers", "workers"),
     ("context_lines", "context_lines"),
     ("timeout", "timeout"),
 )
@@ -84,6 +87,7 @@ def _parser() -> argparse.ArgumentParser:
     translate = sub.add_parser("translate", help="Translate pending lines in a Lantern copy")
     translate.add_argument("project", type=Path, help="Copy created by extract or run")
     _add_job_options(translate)
+    translate.add_argument("--workers", type=int, default=None, help="Concurrent translation requests, default 4")
     translate.add_argument("--force", action="store_true", help="Retranslate lines already marked translated")
     translate.add_argument(
         "--limit",
@@ -118,6 +122,7 @@ def _parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="Copy, extract, translate, and build")
     _add_game_out(run)
     _add_job_options(run)
+    run.add_argument("--workers", type=int, default=None, help="Concurrent translation requests, default 4")
     run.add_argument("--force", action="store_true")
     run.add_argument(
         "--limit",
@@ -142,7 +147,7 @@ def _add_job_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default=None, help="Ollama host, default http://127.0.0.1:11434")
     parser.add_argument("--glossary", type=Path, default=None, help="JSON glossary of names and terms")
     parser.add_argument("--mock-map", type=Path, default=None, dest="mock_map", help="JSON source-to-translation map used by --provider mock")
-    parser.add_argument("--batch-size", type=int, default=None, dest="batch_size")
+    parser.add_argument("--batch-size", type=int, default=None, dest="batch_size", help="Consecutive lines per request, default 32")
     parser.add_argument("--context", type=int, default=None, dest="context_lines", help="Earlier lines from the same scene sent as context")
     parser.add_argument("--timeout", type=float, default=None, help="Seconds to wait for one Ollama response")
 
@@ -235,18 +240,26 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    started = time.perf_counter()
     paths, created, code = _open_for_extract(args.game, args.out)
     if paths is None:
         return code
+    mark = time.perf_counter()
     code = _extract(paths, args, fresh=created)
+    _print_timing("extract", time.perf_counter() - mark)
     if code != 0:
         return code
     config = load_config(paths.project)
+    mark = time.perf_counter()
     stats = _translate(paths, config, force=args.force, limit=getattr(args, "limit", None))
     _print_result(stats)
+    _print_timing("translate", stats.seconds, stats.translated)
+    mark = time.perf_counter()
     written = _build(paths, str(config["language"]))
+    _print_timing("build", time.perf_counter() - mark)
     for path in written:
         print(f"wrote: {path.relative_to(paths.project).as_posix()}")
+    _print_timing("total", time.perf_counter() - started, stats.translated)
     if stats.flagged:
         print("Some lines were flagged. Export them, edit, import, and build again.")
     return 0
@@ -272,8 +285,15 @@ def _open_for_extract(game: Path, out: Path | None) -> tuple[GamePaths | None, b
                 "Pass --out COPY. Lantern does not extract into the original game folder."
             )
         return source, False, 0
+    existing = reuse_project(out)
+    if existing is not None:
+        print(f"reused: {existing.project} (asset folders were not copied)")
+        print("timing: copy 0.00s (reused)")
+        return existing, False, 0
+    started = time.perf_counter()
     copy_project(source.project, out)
     print(f"copied: {source.project} -> {out.resolve()}")
+    print(f"timing: copy {time.perf_counter() - started:.2f}s")
     return resolve_game(out), True, 0
 
 
@@ -301,13 +321,24 @@ def _extract(paths: GamePaths, args: argparse.Namespace, *, fresh: bool) -> int:
     return 0
 
 
+def _print_timing(stage: str, seconds: float, lines: int | None = None) -> None:
+    if lines:
+        rate = lines / seconds if seconds > 0 else 0.0
+        print(f"timing: {stage} {seconds:.2f}s ({rate:.1f} lines/s)")
+        return
+    print(f"timing: {stage} {seconds:.2f}s")
+
+
 def _print_result(stats) -> None:
     if stats.dialogue_selected is not None:
         print(
             f"limit: first {stats.dialogue_selected} dialogue lines "
             f"({stats.dialogue_total} dialogue lines in the project; other lines are left unchanged)"
         )
-    print(f"result: translated={stats.translated} skipped={stats.skipped} flagged={stats.flagged}")
+    rate = ""
+    if stats.seconds > 0 and stats.translated:
+        rate = f" ({stats.translated / stats.seconds:.1f} lines/s)"
+    print(f"result: translated={stats.translated} skipped={stats.skipped} flagged={stats.flagged}{rate}")
 
 
 def _translate(paths: GamePaths, config: dict[str, object], *, force: bool, limit: int | None = None):
@@ -340,6 +371,7 @@ def _translate(paths: GamePaths, config: dict[str, object], *, force: bool, limi
             context_lines=int(config["context_lines"]),
             force=force,
             limit=limit,
+            workers=int(config.get("workers") or 1),
         )
 
 

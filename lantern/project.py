@@ -40,7 +40,8 @@ def default_config() -> dict[str, object]:
         "provider": "ollama",
         "model": DEFAULT_MODEL,
         "host": DEFAULT_HOST,
-        "batch_size": 8,
+        "batch_size": 32,
+        "workers": 4,
         "context_lines": 4,
         "timeout": 180,
     }
@@ -91,6 +92,17 @@ def copy_project(source: Path, output: Path) -> Path:
         raise ProjectError(f"{output} already exists. Pick a new --out folder so an existing copy is not overwritten.")
     shutil.copytree(source, output)
     return output.resolve()
+
+
+def reuse_project(output: Path) -> GamePaths | None:
+    """Return an existing Lantern copy so a rerun does not copy asset folders again."""
+
+    if not output.exists():
+        return None
+    paths = resolve_game(output)
+    if db_path(paths.project).is_file():
+        return paths
+    return None
 
 
 def install_sidecar(project: Path, filename: str, source: Path | None) -> Path | None:

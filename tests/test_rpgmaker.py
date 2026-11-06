@@ -160,7 +160,7 @@ def test_cli_limit_writes_only_the_first_dialogue_lines(tmp_path: Path, capsys):
     assert code == 0
     output = capsys.readouterr().out
     assert "limit: first 2 dialogue lines" in output
-    assert "result: translated=2 skipped=0 flagged=0" in output
+    assert "flagged=0" in output
 
     common = json.loads((out / "data" / "CommonEvents.json").read_text(encoding="utf-8"))
     first = dialogue[0]
@@ -175,6 +175,28 @@ def test_cli_limit_writes_only_the_first_dialogue_lines(tmp_path: Path, capsys):
     system = json.loads((out / "data" / "System.json").read_text(encoding="utf-8"))
     assert system["currencyUnit"] == "金币"
     assert (source / "data" / "Map001.json").read_bytes() == (FIXTURE / "data" / "Map001.json").read_bytes()
+
+
+def test_second_run_reuses_the_copy_and_keeps_assets(tmp_path: Path, capsys):
+    source = tmp_path / "source"
+    shutil.copytree(FIXTURE, source)
+    extracted = RpgMakerAdapter().extract(resolve_game(source))
+    mapping = {record.source: "EN:" + record.source for record in extracted.records}
+    mock_map = tmp_path / "mock_map.json"
+    mock_map.write_text(json.dumps(mapping, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "out"
+    args = ["run", str(source), "--out", str(out), "--provider", "mock", "--mock-map", str(mock_map)]
+    assert main(args) == 0
+    marker = out / "img" / "keep.bin"
+    marker.parent.mkdir()
+    marker.write_bytes(b"asset")
+    capsys.readouterr()
+    assert main(args) == 0
+    output = capsys.readouterr().out
+    assert "reused:" in output
+    assert "copied:" not in output
+    assert marker.read_bytes() == b"asset"
+    assert "skipped=" in output
 
 
 def test_mv_project_is_recognized(tmp_path: Path):

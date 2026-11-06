@@ -1,6 +1,7 @@
+import json
 from pathlib import Path
 
-from lantern.glossary import GlossaryEntry, select_glossary
+from lantern.glossary import GlossaryEntry, load_glossary, select_glossary
 from lantern.mask import mask_text
 from lantern.models import BatchRequest, Record, source_hash
 from lantern.providers.base import ProviderResponseError, ProviderUnavailable, TranslationProvider
@@ -223,6 +224,93 @@ def test_ollama_chat_payload_turns_thinking_off():
     assert payload["think"] is False
     assert payload["model"] == "qwen3:8b"
     assert payload["stream"] is False
+
+
+def test_batch_mismatch_falls_back_to_single_lines(tmp_path: Path):
+    from lantern.providers.base import ProviderResponseError
+
+    records = [_record(f"d{index}", f"行{index}", index) for index in range(4)]
+
+    class SplitOnBatch(TranslationProvider):
+        name = "split"
+        model = "split"
+
+        def __init__(self):
+            self.calls: list[list[str]] = []
+
+        def translate_batch(self, request: BatchRequest) -> dict[str, str]:
+            ids = [line.id for line in request.lines]
+            self.calls.append(ids)
+            if len(ids) > 1:
+                raise ProviderResponseError("count mismatch")
+            return {ids[0]: f"Line {ids[0]}"}
+
+    provider = SplitOnBatch()
+    stats, saved = _run(tmp_path, records, provider, batch_size=4)
+    assert stats.translated == 4
+    assert stats.flagged == 0
+    assert provider.calls[0] == ["d0", "d1", "d2", "d3"]
+    assert provider.calls.count(provider.calls[0]) == 1
+    assert ["d0"] in provider.calls and ["d3"] in provider.calls
+    assert {record.translation for record in saved} == {f"Line {record.id}" for record in saved}
+
+
+def test_placeholder_failure_retries_only_that_line_then_a_smaller_batch(tmp_path: Path):
+    first = _record("good", "こんにちは。", 0)
+    bad = _record("bad", "今日は{w}いい。", 1)
+    mapping = {first.source: "Hello.", bad.source: "Today is {w}fine."}
+    provider = MapProvider(mapping, fail_ids={"bad"}, fail_times=1)
+    stats, saved = _run(tmp_path, [first, bad], provider, batch_size=32)
+    assert provider.calls == [["good", "bad"], ["bad"]]
+    assert stats.translated == 2
+    assert {record.status for record in saved} == {"translated"}
+
+
+def test_pinned_names_are_not_translated_again(tmp_path: Path):
+    name = _record("name", "芙莉莲", 0, kind="name")
+    name.rebuild = {"command": 101}
+    line = _record("line", "芙莉莲，走吧。", 1)
+    line.speaker = "芙莉莲"
+    provider = MapProvider({line.source: "Let's go.", "芙莉莲": "Fairy Lady"})
+    stats, saved = _run(
+        tmp_path,
+        [name, line],
+        provider,
+        glossary=[GlossaryEntry("芙莉莲", "Frieren")],
+    )
+    sent = [line_id for call in provider.calls for line_id in call]
+    assert "glossary-name:0" not in sent
+    assert sent == ["line"]
+    by_id = {record.id: record for record in saved}
+    assert by_id["name"].translation == "Frieren"
+    assert by_id["line"].translation == "Let's go."
+    assert stats.names_translated == 1
+    request = provider.requests[-1]
+    assert request.glossary[0].source == "芙莉莲"
+    assert request.glossary[0].target == "Frieren"
+
+
+def test_unpinned_name_is_translated_once_and_reused(tmp_path: Path):
+    name = _record("name", "菲伦<e1>", 0, kind="name")
+    name.rebuild = {"command": 101}
+    line = _record("line", "菲伦看了过来。", 1)
+    line.speaker = "菲伦<e1>"
+    provider = MapProvider({"菲伦": "Fern", line.source: "Fern looked over."})
+    _stats, saved = _run(tmp_path, [name, line], provider)
+    assert ["glossary-name:0"] in provider.calls
+    assert provider.calls.count(["glossary-name:0"]) == 1
+    by_id = {record.id: record for record in saved}
+    assert by_id["name"].translation == "Fern<e1>"
+    assert by_id["line"].translation == "Fern looked over."
+    cached = json.loads((tmp_path / ".lantern" / "auto-glossary.json").read_text(encoding="utf-8"))
+    assert cached["菲伦"] == "Fern"
+
+
+def test_glossary_text_file(tmp_path: Path):
+    path = tmp_path / "names.txt"
+    path.write_text("# pins\n芙莉莲=Frieren\n菲伦=Fern\n", encoding="utf-8")
+    entries = load_glossary(path)
+    assert [(entry.source, entry.target) for entry in entries] == [("芙莉莲", "Frieren"), ("菲伦", "Fern")]
 
 
 def test_limit_translates_only_the_first_dialogue_lines(tmp_path: Path):

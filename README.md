@@ -35,7 +35,7 @@ The real game used to check this adapter is not in the repository. Tests use `te
 
 ## Windows setup
 
-Lantern needs Python 3.10 or newer. Python 3.12 is a good choice on a laptop. Install it from <https://www.python.org/downloads/windows/> and leave the **py launcher** enabled. Install [Git for Windows](https://git-scm.com/download/win) as well. `pip` uses Git to install Lantern from the private repository.
+Lantern needs Python 3.10 or newer. Python 3.12 is a good choice on a laptop. Install it from <https://www.python.org/downloads/windows/> and leave the **py launcher** enabled. Install [Git for Windows](https://git-scm.com/download/win) as well. `pip` uses Git to install Lantern.
 
 Open PowerShell or Command Prompt:
 
@@ -55,13 +55,37 @@ The default model is `qwen3:8b` (Apache-2.0, about 5 GB at Q4). It fits an 8 GB 
 ollama pull qwen3:8b
 ```
 
+Quit the Ollama tray app, then start the server with several requests in flight. The default `--workers 4` only helps if Ollama allows 4 parallel generations:
+
+```bat
+set OLLAMA_NUM_PARALLEL=4
+ollama serve
+```
+
+In PowerShell that is `$env:OLLAMA_NUM_PARALLEL = "4"` before `ollama serve`.
+
 Game text is sent only to that local host. A first quality check should translate a few dozen dialogue lines, not the whole game:
 
 ```bat
 lantern run C:\Games\MyGame --out C:\Games\MyGame-en --language english --limit 50
 ```
 
-`--limit 50` translates the first 50 dialogue lines and leaves every other line in the source language. Names, menus, and later dialogue stay as they were. Drop `--limit` when you want the rest. `--model` changes the Ollama tag if you pull a different one.
+`--limit 50` translates character names once, then the first 50 dialogue lines. Later dialogue stays in the source language. Drop `--limit` for the rest. A second `lantern run` with the same `--out` does not copy `img` or `audio` again. It reuses the folder and only rewrites data files that changed. The cache makes a finished rerun skip the model.
+
+For a full Chinese RPG Maker game, pin names and run every line:
+
+```bat
+lantern run C:\Games\MyGame --out C:\Games\MyGame-en --language english --source-language chinese --batch-size 32 --workers 4 --glossary C:\Games\names.txt
+```
+
+`names.txt` is one pinned pair per line. Pins are not sent to the model:
+
+```text
+芙莉莲=Frieren
+菲伦=Fern
+```
+
+Lantern also collects actor names and dialogue speakers, translates each remaining name once, and inserts that glossary into every later batch. A JSON glossary still works. `--model` changes the Ollama tag if you pull a different one.
 
 Then, in the copy, choose the language in the game's preferences. Ren'Py does not switch languages just because `tl/english` exists. The font in the game also has to contain the characters you translate into. Lantern does not edit fonts or redraw text that is baked into images.
 
@@ -96,9 +120,9 @@ The original `examples/sample-renpy` is not modified. Running `lantern translate
 | `lantern export COPY -o review.csv` | Flagged lines as CSV. Use `--all`, or `-o review.json` |
 | `lantern import COPY review.csv` | Load edits. A row becomes `reviewed` unless its status column says otherwise |
 
-Useful options: `--language english`, `--source-language japanese`, `--model qwen3:8b`, `--host`, `--glossary glossary.json`, `--batch-size 8`, `--context 4`, `--timeout 180`, `--limit 50`, `--force`.
+Useful options: `--language english`, `--source-language chinese`, `--model qwen3:8b`, `--host`, `--glossary names.txt`, `--batch-size 32`, `--workers 4`, `--context 4`, `--timeout 180`, `--limit 50`, `--force`.
 
-`--limit N` translates only the first N dialogue lines, in project order, and writes only those into the copy. Use it to judge tone before a full run.
+`--limit N` translates character names, then only the first N dialogue lines. `--batch-size` is how many consecutive lines of one scene go in one request (default 32). If a batch comes back with the wrong count or broken placeholders, Lantern retries it in smaller pieces, down to one line. `--workers` is how many of those requests run at once (default 4). Set `OLLAMA_NUM_PARALLEL` to the same number before starting Ollama.
 
 `--force` retranslates lines already marked translated. Lines you imported as `reviewed` are kept. Changing the glossary does not invalidate the cache; pass `--force` when you want old lines redone.
 
